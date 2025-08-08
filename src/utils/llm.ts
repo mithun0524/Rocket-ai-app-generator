@@ -6,7 +6,7 @@ import { llmRawSchema, salvageJson, transformRawToBlueprint } from './blueprintP
 async function callGeminiRaw(prompt: string, _params?: any, apiKeyOverride?: string, forceJsonInstruction = false): Promise<string> {
   const apiKey = apiKeyOverride || env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('Gemini API key missing');
-  const model = _params?.model || 'gemini-2.5-flash';
+  const model = _params?.model || env.GEMINI_MODEL || 'gemini-1.5-flash';
   const baseInstruction = 'You are a Next.js app generator. Output ONLY JSON matching the agreed blueprint schema with keys: pages[], components[], apiRoutes[], prismaModels[]. No markdown, no code fences.';
   const extra = forceJsonInstruction ? 'Return strictly valid JSON. Do NOT use backticks. All code must be string values with proper escaped quotes and newlines. If code contains backticks replace them with plain quotes.' : '';
   const user = `Prompt: ${prompt}`;

@@ -64,7 +64,7 @@ async function streamOllamaRaw(prompt: string, params: any, onToken: (t:string)=
 async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>void, onDebug?:(info:any)=>void): Promise<string> {
   const apiKey = params?.geminiKey || env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('Gemini API key missing');
-  const model = params?.model || 'gemini-2.5-flash';
+  const model = params?.model || env.GEMINI_MODEL || 'gemini-1.5-flash';
   const baseInstruction = 'You are a Next.js app generator. Output ONLY JSON matching the agreed blueprint schema with keys: pages[], components[], apiRoutes[], prismaModels[]. No markdown, no code fences.';
   const user = `Prompt: ${prompt}`;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`;
@@ -213,7 +213,10 @@ export async function POST(req: Request) {
         catch (e:any) { primaryErr = e?.message || 'primary provider failed'; }
         if (!fallbackBp) { push('error', { message:`Empty model output; fallback failed (${primaryErr||'unknown'})` }); return; }
         const minimal = fallbackBp.pages?.length === 1 && fallbackBp.pages[0].code?.includes('Fallback Home');
-        if (minimal) push('log', { message:'Emergency minimal blueprint used (provider failures)', ts: Date.now() });
+        if (minimal) {
+          push('debug', { phase:'minimal-blueprint', reason: primaryErr || 'provider failures', provider });
+          push('log', { message:'Emergency minimal blueprint used (provider failures)', ts: Date.now() });
+        }
         const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (fallbackBp?.name ? String(fallbackBp.name) : 'Generated Project');
         const project = await prisma.project.create({
           data: { name: projectName, prompt, blueprint: JSON.stringify(fallbackBp), user: { connect: { id: userId } } },
