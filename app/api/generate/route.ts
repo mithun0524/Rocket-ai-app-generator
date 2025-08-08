@@ -79,13 +79,15 @@ async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream:true });
-    const parts = buffer.split(/\n+/);
-    buffer = parts.pop() || '';
-    for (const part of parts) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
+    const lines = buffer.split(/\n/);
+    buffer = lines.pop() || '';
+    for (let line of lines) {
+      line = line.trim();
+      if (!line) continue;
+      if (line.startsWith('data:')) line = line.slice(5).trim();
+      if (!line || line === '[DONE]') continue;
       try {
-        const obj = JSON.parse(trimmed);
+        const obj = JSON.parse(line);
         const cands = obj?.candidates;
         if (Array.isArray(cands)) {
           for (const c of cands) {
@@ -168,6 +170,19 @@ export async function POST(req: Request) {
     } catch (e:any) {
       push('error', { message: e?.message || 'Streaming failed' });
       return;
+    }
+
+    // Fallback: if streaming produced no text, use non-streaming unified generation
+    if (!rawText.trim()) {
+      try {
+        push('log', { message:'Streaming returned empty output, falling back to non-streaming generation', ts: Date.now() });
+        const fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
+        // serialize fallback blueprint to rawText for downstream parsing path
+        rawText = JSON.stringify({ ...fallbackBp });
+      } catch (e:any) {
+        push('error', { message: 'Empty model output and fallback failed' });
+        return;
+      }
     }
 
     let blueprint: any = null;
