@@ -339,105 +339,98 @@ export default function DashboardPage() {
   );
 
   const runParamsBar = (
-    <div className='mt-2 flex flex-wrap gap-2 text-[10px]'>
-      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Provider: <span className='text-fuchsia-300'>{provider}</span></span>
-      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Temp {temperature}</span>
-      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Top P {topP}</span>
-      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Max {maxTokens}</span>
-      {projectId && <span className='px-2 py-0.5 rounded-md bg-gradient-to-r from-fuchsia-600/30 to-pink-600/30 border border-fuchsia-500/30 text-fuchsia-200'>Project {projectId.slice(0,6)}</span>}
+    <div className='mt-3 flex flex-wrap gap-2 text-[12px]'>
+      <span className='px-2 py-0.5 rounded bg-gray-800/70 border border-gray-700 text-gray-300'>Provider: <span className='text-fuchsia-400 font-medium'>{provider}</span></span>
+      <span className='px-2 py-0.5 rounded bg-gray-800/70 border border-gray-700 text-gray-300'>Temp {temperature}</span>
+      <span className='px-2 py-0.5 rounded bg-gray-800/70 border border-gray-700 text-gray-300'>Top P {topP}</span>
+      <span className='px-2 py-0.5 rounded bg-gray-800/70 border border-gray-700 text-gray-300'>Max {maxTokens}</span>
+      {projectId && <span className='px-2 py-0.5 rounded bg-gray-800/70 border border-gray-700 text-gray-300'>ID {projectId.slice(0,6)}</span>}
     </div>
   );
 
   // FEED PANEL CONTENT
   const FeedPanel = (
-    <div className='flex flex-col h-full'>
+    <div className='flex flex-col h-full text-[12px] leading-relaxed'>
       {/* Header */}
-      <div className='flex items-center justify-between mb-4 relative'>
-        <div className='flex flex-col'>
-          <h2 className='text-sm font-semibold tracking-wide text-fuchsia-300 flex items-center gap-2'>
-            <span className='relative'>
-              <span className='absolute inset-0 blur-lg bg-fuchsia-600/30 rounded-md -z-10' />
-              <span className='bg-gradient-to-r from-fuchsia-400 via-pink-400 to-cyan-300 bg-clip-text text-transparent'>Rocket Dashboard</span>
-            </span>
-          </h2>
-          <span className='text-[10px] text-gray-500 mt-0.5'>Streaming code generation & iteration</span>
+      <div className='flex items-center justify-between mb-4'>
+        <div>
+          <h2 className='text-sm font-semibold text-gray-200'>Rocket Dashboard</h2>
+          <span className='text-[11px] text-gray-500'>Streaming generation & iteration</span>
         </div>
         <div className='flex gap-2'>
-          {loading && <button onClick={abortGeneration} className='px-2 py-1 rounded bg-red-600/70 hover:bg-red-600 text-[10px] text-white shadow shadow-red-900/40'>Abort</button>}
-          <Link href='/projects' className='text-[10px] text-gray-400 hover:text-fuchsia-300 underline'>Projects</Link>
+          {loading && <button onClick={abortGeneration} className='px-3 py-1.5 rounded bg-red-600/80 hover:bg-red-600 text-[12px] text-white'>Abort</button>}
+          <Link href='/projects' className='text-[12px] text-gray-400 hover:text-gray-200 underline'>Projects</Link>
         </div>
       </div>
       {/* Prompt */}
-      <form onSubmit={generate} className='mb-4 space-y-3 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md px-3 pt-3 pb-4 shadow-inner shadow-black/40 gradient-border'>
-        <label className='text-[11px] uppercase tracking-wide text-gray-400 font-medium flex items-center justify-between'>
+      <form onSubmit={generate} className='mb-5 space-y-3 rounded-lg border border-gray-800 bg-gray-900/40 backdrop-blur-sm p-4'>
+        <label className='text-xs uppercase tracking-wide text-gray-400 font-medium flex items-center justify-between'>
           <span>Prompt</span>
-          {doneSteps>0 && <span className='text-[9px] text-gray-500 font-normal'>{doneSteps}/{totalSteps} steps</span>}
+          {doneSteps>0 && <span className='text-[11px] text-gray-500 font-normal'>{doneSteps}/{totalSteps} steps</span>}
         </label>
-        <div className='rounded-lg glow-ring p-[1px] bg-gradient-to-br from-fuchsia-500/20 via-pink-500/10 to-cyan-500/20'>
-          <div className='rounded-lg bg-black/60 backdrop-blur border border-white/10 relative'>
-            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-32 resize-none bg-transparent rounded-lg p-3 outline-none text-xs leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages…' />
-            {loading && <div className='absolute top-2 right-2 text-[10px] text-fuchsia-300 font-medium'>{Math.max(progress, derivedProgress)}%</div>}
-            {(loading || derivedProgress>0) && (
-              <div className='h-1 w-full bg-gray-800/60 overflow-hidden rounded-b-lg'>
-                <div className='h-full bg-gradient-to-r from-fuchsia-500 via-pink-500 to-cyan-400 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
-              </div>
-            )}
-          </div>
+        <div className='rounded-md border border-gray-800 bg-black/50 relative'>
+          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-32 resize-none bg-transparent rounded-md p-3 outline-none text-[13px] leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages…' />
+          {loading && <div className='absolute top-2 right-2 text-[11px] text-fuchsia-400 font-medium'>{Math.max(progress, derivedProgress)}%</div>}
+          {(loading || derivedProgress>0) && (
+            <div className='h-1 w-full bg-gray-800 overflow-hidden rounded-b-md'>
+              <div className='h-full bg-fuchsia-500 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
+            </div>
+          )}
         </div>
-        <div className='flex flex-wrap gap-3 items-stretch'>
-          <div className='flex items-stretch gap-2 flex-1 min-w-[160px]'>
-            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-2 py-2.5 rounded-md bg-gray-900/70 border border-white/10 text-[11px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
+        <div className='flex flex-wrap gap-4 items-stretch'>
+          <div className='flex items-stretch gap-2 flex-1 min-w-[180px]'>
+            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-3 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
               <option value='ollama'>Ollama (local)</option>
               <option value='gemini'>Gemini (cloud)</option>
             </select>
-            <button disabled={loading} className='flex-1 px-4 py-2.5 rounded-md bg-gradient-to-r from-fuchsia-600 via-pink-600 to-indigo-600 hover:from-fuchsia-500 hover:via-pink-500 hover:to-indigo-500 disabled:opacity-50 text-[11px] font-semibold shadow shadow-fuchsia-900/40 ring-1 ring-white/10'>
+            <button disabled={loading} className='flex-1 px-4 py-2.5 rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 text-[12px] font-medium text-white shadow-sm shadow-black/40'>
               {loading? 'Generating…':'Generate'}
             </button>
           </div>
-          <div className='grid grid-cols-3 gap-3 flex-1 min-w-[220px]'>
-            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
-              <span className='uppercase tracking-wide flex justify-between'>Temp <span className='text-fuchsia-300'>{temperature}</span></span>
+          <div className='grid grid-cols-3 gap-4 flex-1 min-w-[260px]'>
+            <label className='flex flex-col gap-1 text-[11px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Temp <span className='text-gray-300'>{temperature}</span></span>
               <input type='range' min={0} max={1} step={0.05} value={temperature} onChange={e=> setTemperature(parseFloat(e.target.value))} />
             </label>
-            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
-              <span className='uppercase tracking-wide flex justify-between'>Top P <span className='text-fuchsia-300'>{topP}</span></span>
+            <label className='flex flex-col gap-1 text-[11px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Top P <span className='text-gray-300'>{topP}</span></span>
               <input type='range' min={0} max={1} step={0.05} value={topP} onChange={e=> setTopP(parseFloat(e.target.value))} />
             </label>
-            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
-              <span className='uppercase tracking-wide flex justify-between'>Max <span className='text-fuchsia-300'>{maxTokens}</span></span>
-              <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-900/70 border border-white/10 rounded px-1 py-1 text-[10px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500' />
+            <label className='flex flex-col gap-1 text-[11px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Max <span className='text-gray-300'>{maxTokens}</span></span>
+              <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500' />
             </label>
           </div>
         </div>
         {runParamsBar}
-        {error && <div className='text-[11px] text-red-400 font-medium pt-1'>{error}</div>}
+        {error && <div className='text-[12px] text-red-400 font-medium pt-1'>{error}</div>}
       </form>
       {/* Steps */}
-      <div className='space-y-4 overflow-y-auto pr-1 flex-1'>
+      <div className='space-y-5 overflow-y-auto pr-1 flex-1'>
         <div>
           <div className='flex items-center justify-between mb-2'>
-            <h3 className='text-[11px] font-semibold tracking-wide text-gray-300'>Generation Steps</h3>
-            <span className='text-[10px] text-gray-500'>{doneSteps}/{totalSteps}</span>
+            <h3 className='text-xs font-semibold tracking-wide text-gray-300'>Generation Steps</h3>
+            <span className='text-[11px] text-gray-500'>{doneSteps}/{totalSteps}</span>
           </div>
-          <div className='space-y-2'>
+          <div className='space-y-3'>
             {steps.map(s => {
               const timing = stepTimings[s.id];
               const ms = timing?.start && timing?.end ? timing.end - timing.start : null;
               return (
-              <div key={s.id} className='flex items-start gap-2 text-[11px]'>
+              <div key={s.id} className='flex items-start gap-3 text-[12px]'>
                 <StatusIcon status={s.status} />
                 <div className='flex-1'>
-                  <div className='flex items-center gap-2'>
+                  <div className='flex items-center gap-3'>
                     <span className='font-medium text-gray-200'>{s.label}</span>
-                    {s.status==='error' && <span className='text-red-400'>Error</span>}
-                    {s.status==='done' && <span className='text-emerald-400'>Done</span>}
-                    {ms!=null && <span className='text-[10px] text-gray-500'>{fmtMs(ms)}</span>}
+                    {s.status==='error' && <span className='text-red-400 text-[11px]'>Error</span>}
+                    {s.status==='done' && <span className='text-emerald-400 text-[11px]'>Done</span>}
+                    {ms!=null && <span className='text-[11px] text-gray-500'>{fmtMs(ms)}</span>}
                   </div>
-                  {s.note && <div className='text-gray-400'>{s.note}</div>}
+                  {s.note && <div className='text-gray-400 text-[11px]'>{s.note}</div>}
                 </div>
               </div>);
             })}
-            {!steps.length && <div className='text-[11px] text-gray-500 italic'>No generation yet.</div>}
+            {!steps.length && <div className='text-[12px] text-gray-500 italic'>No generation yet.</div>}
           </div>
         </div>
 
