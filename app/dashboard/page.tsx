@@ -38,10 +38,18 @@ export default function DashboardPage() {
   const [confirmMessage, setConfirmMessage] = useState('');
   const pendingStepRef = useRef<string|null>(null);
   const [provider, setProvider] = useState<'ollama' | 'gemini'>('ollama');
+  const [geminiKey, setGeminiKey] = useState('');
+  const [needGeminiKey, setNeedGeminiKey] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [temperature, setTemperature] = useState(0.1);
   const [topP, setTopP] = useState(0.9);
   const [maxTokens, setMaxTokens] = useState(2048);
+  const [isSplit, setIsSplit] = useState(false);
+  const [showIntro, setShowIntro] = useState(true); // new: controls visibility of intro form
+  const leftPanelRef = useRef<HTMLDivElement|null>(null);
+  const rightPanelRef = useRef<HTMLDivElement|null>(null);
+  const formRef = useRef<HTMLFormElement|null>(null); // new: animate form out
+  const gsapRef = useRef<any>(null);
 
   // Derived progress from steps
   const totalSteps = steps.length;
@@ -105,12 +113,16 @@ export default function DashboardPage() {
 
   async function generate(e: React.FormEvent) {
     e.preventDefault();
+    if (provider==='gemini' && !geminiKey.trim()) { setNeedGeminiKey(true); return; }
+    if (!isSplit) setIsSplit(true);
+    // focus / scroll editor into view shortly after split trigger
+    setTimeout(()=> { rightPanelRef.current?.scrollIntoView({ behavior:'smooth', block:'nearest' }); }, 60);
     const controller = newController();
     setLoading(true); setError(null); setCreatedFiles([]); setBlueprint(null); setProjectId(null);
     setSteps([]); stepsRef.current = []; setLogs([]); setTotalFiles(null); setProgress(0); setBlueprintDiff(null); setStepTimings({}); setSelectiveMode(false); setSelectedFiles(new Set());
 
     try {
-      const res = await fetch('/api/generate?stream=1', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ prompt, provider, params:{ temperature, top_p: topP, max_tokens: maxTokens } }), signal: controller.signal });
+      const res = await fetch('/api/generate?stream=1', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ prompt, provider, params:{ temperature, top_p: topP, max_tokens: maxTokens, ...(provider==='gemini'? { geminiKey, model:'gemini-2.5-flash' }: {}) } }), signal: controller.signal });
       if (!res.ok || !res.body) throw new Error('Failed to start generation');
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -226,8 +238,12 @@ export default function DashboardPage() {
         const parts = buffer.split('\n\n'); buffer = parts.pop() || '';
         for(const part of parts){
           const lines = part.split('\n').filter(Boolean); let eventName=''; let dataLine='';
-          for (const l of lines){ if (l.startsWith('event:')) eventName = l.slice(6).trim(); else if (l.startsWith('data:')) dataLine += l.slice(5).trim(); }
-          if(!eventName) continue; try {
+          for (const l of lines){
+            if (l.startsWith('event:')) eventName = l.slice(6).trim();
+            else if (l.startsWith('data:')) dataLine += l.slice(5).trim();
+          }
+          if(!eventName) continue;
+          try {
             const payload = dataLine? JSON.parse(dataLine):{};
             if(eventName==='step') upsertStep(payload.id, payload);
             else if(eventName==='file') setCreatedFiles(f=>{ const next=[...f, payload]; if (totalFiles) setProgress(Math.round((next.length/totalFiles)*100)); return next; });
@@ -369,7 +385,7 @@ export default function DashboardPage() {
           {doneSteps>0 && <span className='text-[11px] text-gray-500 font-normal'>{doneSteps}/{totalSteps} steps</span>}
         </label>
         <div className='rounded-md border border-gray-800 bg-black/50 relative'>
-          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-32 resize-none bg-transparent rounded-md p-3 outline-none text-[13px] leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages…' />
+          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-32 resize-none bg-transparent rounded-md p-3 outline-none text-[13px] leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages,&#10;Realtime multiplayer drawing game with rooms, lobby, drawing phase, voting phase' />
           {loading && <div className='absolute top-2 right-2 text-[11px] text-fuchsia-400 font-medium'>{Math.max(progress, derivedProgress)}%</div>}
           {(loading || derivedProgress>0) && (
             <div className='h-1 w-full bg-gray-800 overflow-hidden rounded-b-md'>
@@ -379,7 +395,7 @@ export default function DashboardPage() {
         </div>
         <div className='flex flex-wrap gap-4 items-stretch'>
           <div className='flex items-stretch gap-2 flex-1 min-w-[180px]'>
-            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-3 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
+            <select value={provider} onChange={e=> { const v=e.target.value as 'ollama'|'gemini'; setProvider(v); if (v==='gemini') setNeedGeminiKey(!geminiKey); }} className='px-3 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
               <option value='ollama'>Ollama (local)</option>
               <option value='gemini'>Gemini (cloud)</option>
             </select>
@@ -403,7 +419,14 @@ export default function DashboardPage() {
           </div>
         </div>
         {runParamsBar}
-        {error && <div className='text-[12px] text-red-400 font-medium pt-1'>{error}</div>}
+        {error ? (<div className='text-[12px] text-red-400 font-medium'>{error}</div>) : null}
+        {provider==='gemini' && (
+          <div className='w-full space-y-2'>
+            <label className='block text-[11px] text-left text-gray-400'>Gemini API Key</label>
+            <input type='password' value={geminiKey} onChange={e=> { setGeminiKey(e.target.value); if (e.target.value) setNeedGeminiKey(false); }} placeholder='Enter your Gemini key' className='w-full px-3 py-2 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'/>
+            {needGeminiKey && <div className='text-[11px] text-red-400'>API key required</div>}
+          </div>
+        )}
       </form>
       {/* Steps */}
       <div className='space-y-5 overflow-y-auto pr-1 flex-1'>
@@ -492,8 +515,24 @@ export default function DashboardPage() {
     <div className='h-full w-full relative bg-black/30 backdrop-blur-sm border-t md:border-t-0 md:border-l border-gray-800/60'>
       {/* Preview toggle */}
       {projectId && (
-        <div className='absolute top-1 left-2 z-10 flex gap-2'>
+        <div className='absolute top-1 left-2 z-20 flex gap-2'>
           <button onClick={()=> setShowPreview(p=>!p)} className='px-2 py-1 rounded bg-gray-800/70 hover:bg-gray-700 text-[10px] text-gray-200 border border-gray-700'>{showPreview? 'Code':'Preview'}</button>
+        </div>
+      )}
+      {loading && steps.length>0 && (
+        <div className='absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-10'>
+          <div className='bg-gray-900/80 border border-gray-700 rounded-lg p-4 w-64 max-w-full space-y-3 shadow-xl'>
+            <div className='text-[11px] font-semibold text-fuchsia-300 tracking-wide'>Generating… {Math.max(progress, derivedProgress)}%</div>
+            <div className='space-y-2 max-h-56 overflow-auto pr-1'>
+              {steps.map(s=> (
+                <div key={s.id} className='flex items-center gap-2 text-[11px]'>
+                  <span className={`w-2 h-2 rounded-full ${s.status==='done'?'bg-emerald-400': s.status==='active'?'bg-fuchsia-400 animate-pulse':'bg-gray-600'}`}></span>
+                  <span className='flex-1 text-gray-300 truncate'>{s.label}</span>
+                  {s.status==='done' && <span className='text-emerald-400'>✔</span>}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
       {!projectId && !loading && (
@@ -501,7 +540,7 @@ export default function DashboardPage() {
           <div>No project yet. Generate to start.</div>
         </div>
       )}
-      {loading && (
+      {loading && !steps.length && (
         <div className='absolute top-2 right-3 text-[10px] px-2 py-1 rounded bg-fuchsia-600/20 border border-fuchsia-500/40 text-fuchsia-200 shadow'>Generating… {Math.max(progress, derivedProgress)}%</div>
       )}
       {projectId && !showPreview && <VSCodeShell projectId={projectId} />}
@@ -539,28 +578,101 @@ export default function DashboardPage() {
     pendingStepRef.current = stepId; setConfirmMessage(msg); setShowConfirm(true);
   }
 
+  // load gsap lazily
+  useEffect(()=> { (async ()=> { try { const mod = await import('gsap'); gsapRef.current = mod.gsap; } catch {} })(); }, []);
+
+  // animate on split (intro -> split view)
+  useEffect(()=> {
+    if (isSplit && showIntro && gsapRef.current && leftPanelRef.current && rightPanelRef.current) {
+      const gsap = gsapRef.current;
+      const lp = leftPanelRef.current;
+      const rp = rightPanelRef.current;
+      const frm = formRef.current;
+      // initial states
+      gsap.set(lp, { flexBasis:'100%', maxWidth:'100%' });
+      gsap.set(rp, { flexBasis:'0%', maxWidth:'0%', opacity:0, display:'flex' });
+      const tl = gsap.timeline({ defaults:{ ease:'power3.inOut' } });
+      if (frm) tl.to(frm, { opacity:0, y:-24, duration:0.35, ease:'power2.out' }, 0);
+      tl.to(lp, { flexBasis:'30%', maxWidth:'30%', duration:0.65 }, 0.05);
+      tl.to(rp, { flexBasis:'70%', maxWidth:'70%', opacity:1, duration:0.65 }, 0.05);
+      tl.add(()=> { setShowIntro(false); });
+    }
+  }, [isSplit, showIntro]);
+
+  // feed entrance after intro removed
+  useEffect(()=> {
+    if (!showIntro && isSplit && gsapRef.current) {
+      // entrance animation disabled temporarily to resolve build issue
+      try { /* gsapRef.current.from('[data-feed-panel]', { opacity:0, y:14, duration:0.45, ease:'power2.out' }); */ } catch {}
+    }
+  }, [showIntro, isSplit]);
+
   return (
-    <div className='h-[calc(100vh-0px)] md:h-[calc(100vh-1rem)] p-0 md:p-2 relative'>
+    <div className='h-[calc(100vh-4rem)] p-0 md:p-2 relative'>
       {ConfirmModal}
-      {/* Mobile top nav */}
-      <div className='md:hidden flex items-center justify-between px-4 py-2 border-b border-gray-800/70 bg-black/60 backdrop-blur-sm'>
-        <div className='flex gap-2'>
-          <button onClick={()=>setActiveTab('feed')} className={`px-3 py-1 rounded text-[11px] ${activeTab==='feed' ? 'bg-fuchsia-600 text-white':'bg-gray-800 text-gray-300'}`}>Feed</button>
-          <button onClick={()=>setActiveTab('editor')} disabled={!projectId} className={`px-3 py-1 rounded text-[11px] ${activeTab==='editor' ? 'bg-fuchsia-600 text-white': projectId? 'bg-gray-800 text-gray-300':'bg-gray-900 text-gray-600'}`}>Editor</button>
+      <div className='flex h-full w-full md:rounded-xl md:border md:border-white/5 overflow-hidden bg-black/40 backdrop-blur-sm'>
+        <div ref={leftPanelRef} className={`flex flex-col h-full relative ${isSplit? 'border-r border-gray-800/60':''}`} style={!isSplit? { flexBasis:'100%', maxWidth:'100%' }: undefined}>
+          {showIntro ? (
+            <div className='flex-1 flex items-center justify-center px-6'>
+              <form ref={formRef} onSubmit={generate} className='w-full max-w-xl space-y-6'>
+                <div className='text-center space-y-1'>
+                  <h2 className='text-xl font-semibold text-gray-100'>Generate a Project</h2>
+                  <p className='text-sm text-gray-500'>Describe what you want. We will blueprint & scaffold.</p>
+                </div>
+                <div className='rounded-lg border border-gray-800 bg-black/60 relative'>
+                  <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-40 resize-none bg-transparent rounded-lg p-4 outline-none text-[13px] leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages,&#10;Realtime multiplayer drawing game with rooms, lobby, drawing phase, voting phase' />
+                  {loading && <div className='absolute top-2 right-2 text-[11px] text-fuchsia-400 font-medium'>{Math.max(progress, derivedProgress)}%</div>}
+                  {(loading || derivedProgress>0) && (
+                    <div className='h-1 w-full bg-gray-800 overflow-hidden rounded-b-md'>
+                      <div className='h-full bg-fuchsia-500 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
+                    </div>
+                  )}
+                </div>
+                <div className='flex flex-wrap gap-4'>
+                  <select value={provider} onChange={e=> { const v=e.target.value as 'ollama'|'gemini'; setProvider(v); if (v==='gemini') setNeedGeminiKey(!geminiKey); }} className='px-3 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
+                    <option value='ollama'>Ollama (local)</option>
+                    <option value='gemini'>Gemini (cloud)</option>
+                  </select>
+                  <label className='flex flex-col text-[11px] text-gray-400'>
+                    <span className='uppercase tracking-wide mb-1'>Temp {temperature}</span>
+                    <input type='range' min={0} max={1} step={0.05} value={temperature} onChange={e=> setTemperature(parseFloat(e.target.value))} />
+                  </label>
+                  <label className='flex flex-col text-[11px] text-gray-400'>
+                    <span className='uppercase tracking-wide mb-1'>Top P {topP}</span>
+                    <input type='range' min={0} max={1} step={0.05} value={topP} onChange={e=> setTopP(parseFloat(e.target.value))} />
+                  </label>
+                  <label className='flex flex-col text-[11px] text-gray-400'>
+                    <span className='uppercase tracking-wide mb-1'>Max {maxTokens}</span>
+                    <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500 w-28' />
+                  </label>
+                </div>
+                {provider==='gemini' && (
+                  <div className='w-full space-y-2'>
+                    <label className='block text-[11px] text-left text-gray-400'>Gemini API Key</label>
+                    <input type='password' value={geminiKey} onChange={e=> { setGeminiKey(e.target.value); if (e.target.value) setNeedGeminiKey(false); }} placeholder='Enter your Gemini key' className='w-full px-3 py-2 rounded-md bg-gray-800 border border-gray-700 text-[12px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'/>
+                    {needGeminiKey && <div className='text-[11px] text-red-400'>API key required</div>}
+                  </div>
+                )}
+                {error ? (<div className='text-[12px] text-red-400 font-medium'>{error}</div>) : null}
+                <div className='flex gap-3 pt-2'>
+                  <button disabled={loading} className='flex-1 px-6 py-3 rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 text-[13px] font-medium text-white disabled:opacity-50 transition'>
+                    {loading? 'Generating…':'Generate'}
+                  </button>
+                  <Link href='/projects' className='px-6 py-3 rounded-md bg-gray-800 hover:bg-gray-700 text-[13px] text-gray-200 transition'>Projects</Link>
+                </div>
+              </form>
+            </div>
+          ) : (
+            <div data-feed-panel className='flex-1 min-h-0 p-4'>
+              {FeedPanel}
+            </div>
+          )}
         </div>
-        <Link href='/projects' className='text-[11px] underline text-fuchsia-300'>Projects</Link>
-      </div>
-
-      {/* Desktop layout */}
-      <div className='hidden md:grid md:grid-cols-[280px_minmax(0,1fr)] h-full md:rounded-xl md:border md:border-white/5 overflow-hidden bg-black/40 backdrop-blur-sm'>
-        <div className='p-4 flex flex-col border-r border-gray-800/60'>{FeedPanel}</div>
-        {EditorPanel}
-      </div>
-
-      {/* Mobile layout */}
-      <div className='md:hidden h-[calc(100vh-3.5rem)]'>
-        {activeTab==='feed' && <div className='h-full p-4 overflow-y-auto'>{FeedPanel}</div>}
-        {activeTab==='editor' && <div className='h-full'>{EditorPanel}</div>}
+        {isSplit && (
+          <div ref={rightPanelRef} className='flex-1 min-w-0 relative flex'>
+            {EditorPanel}
+          </div>
+        )}
       </div>
     </div>
   );
