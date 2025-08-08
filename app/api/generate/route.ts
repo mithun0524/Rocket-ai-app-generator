@@ -188,99 +188,105 @@ export async function POST(req: Request) {
 
   return streamify(async push => {
     push('log', { message: 'Starting generation', ts: Date.now() });
-    push('step', { id:'parse', status:'active', label:'Parsing prompt' });
-
-    let rawText = '';
+    // New structure planning phase
+    push('step', { id:'parse', status:'active', label:'Planning structure' });
+    const structureProvider: 'gemini'|'ollama' = provider === 'gemini' ? 'gemini' : 'ollama';
+    let structurePlan: any = null;
     try {
-      if (provider === 'gemini') {
-        rawText = await streamGeminiRaw(prompt, params||{}, t => push('token', { text: t, provider:'gemini' }), d => push('debug', d));
-      } else {
-        rawText = await streamOllamaRaw(prompt, params||{}, t => push('token', { text: t, provider:'ollama' }));
-      }
+      const { generateStructurePlan } = await import('@/utils/structure');
+      structurePlan = await generateStructurePlan(prompt, structureProvider, params||{});
+      push('event', { type:'structure-plan', plan: structurePlan });
+      push('log', { message:`Structure planned: ${structurePlan.pages.length} pages, ${structurePlan.components.length} components, ${structurePlan.apiRoutes.length} APIs`, ts: Date.now() });
     } catch (e:any) {
-      push('error', { message: e?.message || 'Streaming failed' });
-      return;
+      push('log', { message:'Structure planning failed, using minimal default', ts: Date.now() });
+      structurePlan = { pages:[{ route:'/', title:'Home'}], components:[], apiRoutes:[], prismaModels:[] };
+      push('event', { type:'structure-plan', plan: structurePlan, fallback:true });
     }
-
-    // Fallback: if streaming produced no text, use non-streaming unified generation
-    if (!rawText.trim()) {
-      push('debug', { phase:'empty-stream', provider, note:'No tokens accumulated from streaming path' });
-      try {
-        push('log', { message:'Streaming returned empty output, invoking unified generation fallback', ts: Date.now() });
-        let fallbackBp = null as any;
-        let primaryErr: string | null = null;
-        try { fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params); }
-        catch (e:any) { primaryErr = e?.message || 'primary provider failed'; }
-        if (!fallbackBp) { push('error', { message:`Empty model output; fallback failed (${primaryErr||'unknown'})` }); return; }
-        const minimal = fallbackBp.pages?.length === 1 && fallbackBp.pages[0].code?.includes('Fallback Home');
-        if (minimal) {
-          push('debug', { phase:'minimal-blueprint', reason: primaryErr || 'provider failures', provider });
-          push('log', { message:'Emergency minimal blueprint used (provider failures)', ts: Date.now() });
-        }
-        const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (fallbackBp?.name ? String(fallbackBp.name) : 'Generated Project');
-        const project = await prisma.project.create({
-          data: { name: projectName, prompt, blueprint: JSON.stringify(fallbackBp), user: { connect: { id: userId } } },
-        });
-        push('meta', { projectId: project.id });
-        push('step', { id:'parse', status:'done' });
-        push('step', { id:'plan', status:'done', label:'Planning blueprint' });
-        push('step', { id:'validate', status:'done', label:'Validating schema' });
-        push('step', { id:'write', status:'active', label:'Writing files' });
-        const totalFiles = (
-          (fallbackBp.components?.length || 0) +
-          (fallbackBp.pages?.length || 0) +
-          (fallbackBp.apiRoutes?.length || 0) +
-          (fallbackBp.components?.length ? 1 : 0) +
-          (fallbackBp.prismaModels?.length ? 1 : 0)
-        );
-        push('total', { files: totalFiles });
-        let fileCount = 0;
-        await writeGeneratedProject(project.id, fallbackBp, rec => { fileCount++; push('file', { ...rec, index: fileCount, total: totalFiles }); push('log', { message: `Created ${rec.relativePath}`, ts: Date.now() }); }, undefined, {
-          start: (rec, size) => push('file-start', { relativePath: rec.relativePath, type: rec.type, size }),
-          chunk: (rec, chunk) => push('file-chunk', { relativePath: rec.relativePath, chunk }),
-          end: (rec) => push('file-end', { relativePath: rec.relativePath })
-        });
-        push('step', { id:'write', status:'done' });
-        push('step', { id:'final', status:'done', label:'Finalizing project' });
-        push('blueprint', fallbackBp);
-        push('complete', { projectId: project.id });
-        push('log', { message: 'Generation complete (fallback path)', ts: Date.now() });
-        try {
-          const stepMetrics = JSON.stringify({ steps: ['parse','plan','validate','write','final'].map(id=>({ id, ms: null })) });
-          await prisma.run.create({ data: { projectId: project.id, provider: provider==='gemini'?'gemini':'ollama', files: fileCount, stepMetrics, diff: null, params: params? JSON.stringify(params): null } });
-        } catch {}
-        return; // end streaming handler
-      } catch (e:any) {
-        push('error', { message: 'Empty model output and fallback failed (unexpected)' });
-        return;
-      }
-    }
-
-    let blueprint: any = null;
-    try {
-      blueprint = await parseRawToBlueprint(rawText, prompt, provider==='gemini'?'gemini':'ollama');
-    } catch (e:any) {
-      push('log', { message: 'Primary parse failed, attempting unified fallback', ts: Date.now() });
-      try {
-        blueprint = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
-      } catch (gErr:any) {
-        if (provider === 'gemini') {
-          try { blueprint = await generateBlueprintUnified(prompt, 'ollama', params); push('log', { message:'Ollama secondary fallback succeeded', ts: Date.now() }); }
-          catch (oErr:any) { push('error', { message: `Parse failed: ${e?.message}; gemini fallback failed: ${gErr?.message}; ollama fallback failed: ${oErr?.message}` }); return; }
-        } else { push('error', { message: e?.message || 'Parse failed' }); return; }
-      }
-    }
-
-    push('log', { message: 'Blueprint generated', ts: Date.now() });
+    // Begin artifact generation
     push('step', { id:'parse', status:'done' });
-    push('step', { id:'plan', status:'done', label:'Planning blueprint' });
-    push('step', { id:'validate', status:'done', label:'Validating schema' });
+    push('step', { id:'plan', status:'active', label:'Generating artifacts' });
+
+    interface BuiltPage { route:string; title?:string; code:string }
+    interface BuiltComponent { name:string; code:string }
+    interface BuiltApi { route:string; method?:string; code:string }
+    interface BuiltModel { name:string; definition:string }
+
+    const pages: BuiltPage[] = [];
+    const components: BuiltComponent[] = [];
+    const apiRoutes: BuiltApi[] = [];
+    const prismaModels: BuiltModel[] = [];
+
+    const { generateArtifactCode } = await import('@/utils/structure');
+
+    const artifacts: { kind:'page'|'component'|'api'|'model'; ref:any }[] = [];
+    structurePlan.pages.forEach((p:any)=> artifacts.push({ kind:'page', ref:p }));
+    structurePlan.components.forEach((c:any)=> artifacts.push({ kind:'component', ref:c }));
+    structurePlan.apiRoutes.forEach((r:any)=> artifacts.push({ kind:'api', ref:r }));
+    structurePlan.prismaModels?.forEach((m:any)=> artifacts.push({ kind:'model', ref:m }));
+
+    const totalArtifacts = artifacts.length;
+    push('event', { type:'artifact-total', total: totalArtifacts });
+
+    let completed = 0;
+
+    for (const art of artifacts) {
+      const startTs = Date.now();
+      const label = art.kind + ':' + (art.ref.route || art.ref.name);
+      push('event', { type:'artifact-start', kind: art.kind, ref: art.ref });
+      let code = '';
+      let attempt = 0;
+      const maxAttempts = 2;
+      while(attempt < maxAttempts) {
+        attempt++;
+        try {
+          const spec: any = art.kind === 'page' ? { kind:'page', route: art.ref.route }
+            : art.kind === 'component' ? { kind:'component', name: art.ref.name }
+            : art.kind === 'api' ? { kind:'api', route: art.ref.route, method: art.ref.method }
+            : { kind:'model', name: art.ref.name };
+          code = await generateArtifactCode(spec, prompt, structurePlan, structureProvider, params||{});
+          if (code.trim()) break;
+        } catch (e:any) {
+          if (attempt >= maxAttempts) {
+            push('event', { type:'artifact-failed', kind: art.kind, ref: art.ref, error: e?.message || 'generation failed' });
+          }
+        }
+      }
+      if (!code.trim()) {
+        // insert placeholder so blueprint stays consistent
+        if (art.kind==='page') pages.push({ route: art.ref.route, title: art.ref.title, code: "export default function Page(){return <div>TODO</div>}" });
+        else if (art.kind==='component') components.push({ name: art.ref.name, code: "export default function Component(){return <div>TODO</div>}" });
+        else if (art.kind==='api') apiRoutes.push({ route: art.ref.route, method: art.ref.method||'GET', code: "export async function GET(){return Response.json({ ok:true })}" });
+        else if (art.kind==='model') prismaModels.push({ name: art.ref.name, definition: `model ${art.ref.name} { id String @id }` });
+        completed++; push('event', { type:'artifact-complete', kind: art.kind, ref: art.ref, placeholder:true, ms: Date.now()-startTs });
+        continue;
+      }
+      // store
+      if (art.kind==='page') pages.push({ route: art.ref.route, title: art.ref.title, code });
+      else if (art.kind==='component') components.push({ name: art.ref.name, code });
+      else if (art.kind==='api') apiRoutes.push({ route: art.ref.route, method: art.ref.method||'GET', code });
+      else if (art.kind==='model') prismaModels.push({ name: art.ref.name, definition: code });
+      completed++;
+      push('event', { type:'artifact-complete', kind: art.kind, ref: art.ref, ms: Date.now()-startTs });
+      push('event', { type:'progress', completed, total: totalArtifacts });
+    }
+
+    push('step', { id:'plan', status:'done' });
+    push('step', { id:'validate', status:'done', label:'Assembling blueprint' });
+
+    // Assemble blueprint shape consistent with existing writer expectations
+    const blueprint = {
+      name: name || 'Generated Project',
+      pages: pages.map(p=>({ route:p.route, title:p.title, content: p.code })),
+      components: components.map(c=>({ name:c.name, content:c.code })),
+      apiRoutes: apiRoutes.map(r=>({ route:r.route, method:r.method, content:r.code })),
+      prismaModels: prismaModels.map(m=>({ name:m.name, definition:m.definition }))
+    } as any;
+
+    push('step', { id:'validate', status:'done' });
     push('step', { id:'write', status:'active', label:'Writing files' });
 
-    const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (blueprint?.name ? String(blueprint.name) : 'Generated Project');
-    const project = await prisma.project.create({
-      data: { name: projectName, prompt, blueprint: JSON.stringify(blueprint), user: { connect: { id: userId } } },
-    });
+    const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : 'Generated Project';
+    const project = await prisma.project.create({ data: { name: projectName, prompt, blueprint: JSON.stringify(blueprint), user: { connect: { id: userId } } } });
     push('meta', { projectId: project.id });
 
     const totalFiles = (
@@ -291,24 +297,13 @@ export async function POST(req: Request) {
       (blueprint.prismaModels?.length ? 1 : 0)
     );
     push('total', { files: totalFiles });
-
     let fileCount = 0;
-    await writeGeneratedProject(project.id, blueprint, rec => { fileCount++; push('file', { ...rec, index: fileCount, total: totalFiles }); push('log', { message: `Created ${rec.relativePath}`, ts: Date.now() }); }, undefined, {
-      start: (rec, size) => push('file-start', { relativePath: rec.relativePath, type: rec.type, size }),
-      chunk: (rec, chunk) => push('file-chunk', { relativePath: rec.relativePath, chunk }),
-      end: (rec) => push('file-end', { relativePath: rec.relativePath })
-    });
+    await writeGeneratedProject(project.id, blueprint, rec => { fileCount++; push('file', { ...rec, index:fileCount, total: totalFiles }); push('log', { message: `Created ${rec.relativePath}`, ts: Date.now() }); });
 
     push('step', { id:'write', status:'done' });
     push('step', { id:'final', status:'done', label:'Finalizing project' });
     push('blueprint', blueprint);
     push('complete', { projectId: project.id });
-    push('log', { message: 'Generation complete', ts: Date.now() });
-    try {
-      const stepMetrics = JSON.stringify({ steps: ['parse','plan','validate','write','final'].map(id=>({ id, ms: null })) });
-      await prisma.run.create({ data: { projectId: project.id, provider: provider==='gemini'?'gemini':'ollama', files: fileCount, stepMetrics, diff: null, params: params? JSON.stringify(params): null } });
-    } catch (e) {
-      push('log', { message: 'Run persistence failed', ts: Date.now() });
-    }
+    push('log', { message: 'Generation complete (structure-first)', ts: Date.now() });
   });
 }
