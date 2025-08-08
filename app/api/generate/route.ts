@@ -207,17 +207,13 @@ export async function POST(req: Request) {
       push('debug', { phase:'empty-stream', provider, note:'No tokens accumulated from streaming path' });
       try {
         push('log', { message:'Streaming returned empty output, invoking unified generation fallback', ts: Date.now() });
-        let fallbackBp = null;
-        let firstErr: string | null = null;
+        let fallbackBp = null as any;
+        let primaryErr: string | null = null;
         try { fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params); }
-        catch (e:any) { firstErr = e?.message || 'primary provider failed'; }
-        if (!fallbackBp && provider === 'gemini') {
-          // try ollama as second fallback
-            try { fallbackBp = await generateBlueprintUnified(prompt, 'ollama', params); push('log', { message:'Ollama fallback succeeded', ts: Date.now() }); }
-            catch (e2:any) { push('error', { message: `Empty model output; gemini fallback failed (${firstErr}); ollama fallback failed (${e2?.message||'unknown'})` }); return; }
-        }
-        if (!fallbackBp) { push('error', { message:`Empty model output; fallback failed (${firstErr||'unknown'})` }); return; }
-        push('log', { message:'Fallback blueprint obtained', ts: Date.now() });
+        catch (e:any) { primaryErr = e?.message || 'primary provider failed'; }
+        if (!fallbackBp) { push('error', { message:`Empty model output; fallback failed (${primaryErr||'unknown'})` }); return; }
+        const minimal = fallbackBp.pages?.length === 1 && fallbackBp.pages[0].code?.includes('Fallback Home');
+        if (minimal) push('log', { message:'Emergency minimal blueprint used (provider failures)', ts: Date.now() });
         const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (fallbackBp?.name ? String(fallbackBp.name) : 'Generated Project');
         const project = await prisma.project.create({
           data: { name: projectName, prompt, blueprint: JSON.stringify(fallbackBp), user: { connect: { id: userId } } },

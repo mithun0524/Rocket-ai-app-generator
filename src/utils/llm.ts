@@ -26,10 +26,28 @@ function replaceBacktickContent(raw: string): string {
   }).replace(/`{3,}[\s\S]*?`{3,}/g, m => m.replace(/`/g,'')); // strip fenced blocks if any
 }
 
+async function checkOllamaHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${env.OLLAMA_BASE_URL}/api/tags`, { method:'GET' });
+    return res.ok;
+  } catch { return false; }
+}
+
+function minimalBlueprint(prompt: string): Blueprint {
+  return {
+    name: 'Minimal Project',
+    description: `Fallback for: ${prompt.slice(0,80)}`,
+    pages: [{ route: '/', title: 'Home', components: [], code: "export default function Page(){return <div>Fallback Home</div>}" }],
+    components: [],
+    apiRoutes: [],
+    prismaModels: []
+  };
+}
+
 async function generateGeminiBlueprint(prompt: string, params?: any): Promise<Blueprint> {
-  const geminiKey = params?.geminiKey as string | undefined; // provided per request (not persisted)
+  const geminiKey = params?.geminiKey as string | undefined;
   let rawText = await callGeminiRaw(prompt, params, geminiKey);
-  if (!rawText.trim()) return generateOllamaBlueprint(prompt);
+  if (!rawText.trim()) throw new Error('GeminiEmpty');
   // First sanitation pass for backticks before salvage
   let attemptTexts: string[] = [rawText, replaceBacktickContent(rawText)];
   let rawJson: any = null;
@@ -37,11 +55,10 @@ async function generateGeminiBlueprint(prompt: string, params?: any): Promise<Bl
     try { rawJson = salvageJson(candidate); break; } catch {}
   }
   if (!rawJson) {
-    // Second model attempt with stricter instruction
     const retry = await callGeminiRaw(prompt, params, geminiKey, true);
     const retrySanitized = replaceBacktickContent(retry);
     try { rawJson = salvageJson(retrySanitized); } catch {
-      return generateOllamaBlueprint(prompt);
+      throw new Error('GeminiUnparseable');
     }
   }
   const parsed = llmRawSchema.safeParse(rawJson);
@@ -51,7 +68,7 @@ async function generateGeminiBlueprint(prompt: string, params?: any): Promise<Bl
     if (!Array.isArray(coerce.components)) coerce.components = [];
     if (!Array.isArray(coerce.apiRoutes)) coerce.apiRoutes = [];
     const reparsed = llmRawSchema.safeParse(coerce);
-    if (!reparsed.success) return generateOllamaBlueprint(prompt);
+    if (!reparsed.success) throw new Error('GeminiSchema');
     return transformRawToBlueprint(reparsed.data, prompt);
   }
   const { meta, ...usable } = parsed.data as any;
@@ -59,6 +76,26 @@ async function generateGeminiBlueprint(prompt: string, params?: any): Promise<Bl
 }
 
 export async function generateBlueprintUnified(prompt: string, provider: 'ollama' | 'gemini' = 'ollama', params?: any): Promise<Blueprint> {
-  if (provider === 'gemini') return generateGeminiBlueprint(prompt, params);
-  return generateOllamaBlueprint(prompt, params);
+  if (provider === 'gemini') {
+    try { return await generateGeminiBlueprint(prompt, params); }
+    catch (e:any) {
+      const msg = e?.message || '';
+      // cascade to ollama if available
+      const healthy = await checkOllamaHealth();
+      if (healthy) {
+        try { return await generateOllamaBlueprint(prompt, params); }
+        catch (ollErr:any) {
+          // final emergency fallback
+          return minimalBlueprint(prompt);
+        }
+      }
+      // no healthy ollama
+      return minimalBlueprint(prompt);
+    }
+  }
+  // provider ollama
+  try { return await generateOllamaBlueprint(prompt, params); }
+  catch {
+    return minimalBlueprint(prompt);
+  }
 }
