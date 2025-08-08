@@ -50,6 +50,8 @@ export default function DashboardPage() {
   const rightPanelRef = useRef<HTMLDivElement|null>(null);
   const formRef = useRef<HTMLFormElement|null>(null); // new: animate form out
   const gsapRef = useRef<any>(null);
+  const [streamingFiles, setStreamingFiles] = useState<Record<string,{type:string; size?:number; content:string; done:boolean}>>({});
+  const [activeStreamingFile, setActiveStreamingFile] = useState<string|undefined>(undefined);
 
   // Derived progress from steps
   const totalSteps = steps.length;
@@ -166,6 +168,16 @@ export default function DashboardPage() {
               const payload = dataLine ? JSON.parse(dataLine) : {};
               if (eventName==='step') { upsertStep(payload.id, payload); }
               else if (eventName==='file') { setCreatedFiles(f=>{ const next=[...f, payload]; if (totalFiles) { setProgress(Math.round((next.length/totalFiles)*100)); } return next; }); }
+              else if (eventName==='file-start') {
+                setStreamingFiles(f=> { const nf={ ...f, [payload.relativePath]: { type: payload.type||'unknown', size: payload.size, content:'', done:false } }; if(!activeStreamingFile) setActiveStreamingFile(payload.relativePath); return nf; });
+              }
+              else if (eventName==='file-chunk') {
+                const rel = payload.relativePath; const chunk = payload.chunk||'';
+                setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, content: cur.content + chunk } }; });
+              }
+              else if (eventName==='file-end') {
+                const rel = payload.relativePath; setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, done:true } }; });
+              }
               else if (eventName==='total') { setTotalFiles(payload.files || 0); }
               else if (eventName==='meta' && payload.projectId) { setProjectId(payload.projectId); }
               else if (eventName==='blueprint') { setBlueprint(payload); }
@@ -247,10 +259,16 @@ export default function DashboardPage() {
             const payload = dataLine? JSON.parse(dataLine):{};
             if(eventName==='step') upsertStep(payload.id, payload);
             else if(eventName==='file') setCreatedFiles(f=>{ const next=[...f, payload]; if (totalFiles) setProgress(Math.round((next.length/totalFiles)*100)); return next; });
-            else if(eventName==='total') setTotalFiles(payload.files||0);
-            else if(eventName==='log') setLogs(l=>[...l, payload]);
-            else if(eventName==='blueprint') setBlueprint(payload);
-            else if(eventName==='diff') setBlueprintDiff(payload);
+            else if (eventName==='file-start') {
+              setStreamingFiles(f=> { const nf={ ...f, [payload.relativePath]: { type: payload.type||'unknown', size: payload.size, content:'', done:false } }; if(!activeStreamingFile) setActiveStreamingFile(payload.relativePath); return nf; });
+            }
+            else if (eventName==='file-chunk') {
+              const rel = payload.relativePath; const chunk = payload.chunk||'';
+              setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, content: cur.content + chunk } }; });
+            }
+            else if (eventName==='file-end') {
+              const rel = payload.relativePath; setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, done:true } }; });
+            }
             else if(eventName==='complete') { setProgress(100); finalizeRun(); }
           } catch {}
         }
@@ -532,6 +550,12 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+            {activeStreamingFile && streamingFiles[activeStreamingFile] && (
+              <div className='text-[10px] font-mono bg-black/40 border border-gray-700 rounded p-2 max-h-36 overflow-auto'>
+                <div className='mb-1 text-fuchsia-300 truncate'>{activeStreamingFile}</div>
+                <pre className='whitespace-pre-wrap leading-snug'>{streamingFiles[activeStreamingFile].content.slice(-4000)}</pre>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -603,7 +627,7 @@ export default function DashboardPage() {
   useEffect(()=> {
     if (!showIntro && isSplit && gsapRef.current) {
       // entrance animation disabled temporarily to resolve build issue
-      try { /* gsapRef.current.from('[data-feed-panel]', { opacity:0, y:14, duration:0.45, ease:'power2.out' }); */ } catch {}
+      try { /* gsapRef.current.from('[data-feed-panel]', { opacity:0, y=14, duration:0.45, ease:'power2.out' }); */ } catch {}
     }
   }, [showIntro, isSplit]);
 

@@ -32,11 +32,29 @@ const apiTemplate = Handlebars.compile(`import { NextResponse } from 'next/serve
 
 export interface GeneratedFileRecord { type: 'page' | 'component' | 'api' | 'prisma' | 'barrel'; relativePath: string; }
 
+export interface FileContentStreamer {
+  start?: (rec: GeneratedFileRecord, size: number) => void;
+  chunk?: (rec: GeneratedFileRecord, chunk: string) => void;
+  end?: (rec: GeneratedFileRecord) => void;
+}
+
 // Added optional includePaths (array of relative paths) to restrict which files are (re)written
-export async function writeGeneratedProject(projectId: string, blueprint: Blueprint, onFile?: (rec: GeneratedFileRecord) => void, includePaths?: string[]): Promise<GeneratedFileRecord[]> {
+// Added optional contentStreamer for real-time file content streaming
+export async function writeGeneratedProject(projectId: string, blueprint: Blueprint, onFile?: (rec: GeneratedFileRecord) => void, includePaths?: string[], contentStreamer?: FileContentStreamer): Promise<GeneratedFileRecord[]> {
   const includeSet = includePaths && includePaths.length ? new Set(includePaths) : null;
   const created: GeneratedFileRecord[] = [];
   const notify = (rec: GeneratedFileRecord) => { created.push(rec); if (onFile) try { onFile(rec); } catch { /* ignore */ } };
+  const streamStart = (rec: GeneratedFileRecord, code: string) => { try { contentStreamer?.start?.(rec, code.length); } catch {} };
+  const streamChunks = (rec: GeneratedFileRecord, code: string) => {
+    if (!contentStreamer?.chunk) return;
+    const size = 800; // chunk size characters
+    for (let i=0;i<code.length;i+=size) {
+      const slice = code.slice(i, i+size);
+      try { contentStreamer.chunk(rec, slice); } catch {}
+    }
+  };
+  const streamEnd = (rec: GeneratedFileRecord) => { try { contentStreamer?.end?.(rec); } catch {} };
+
   const base = path.join(GENERATED_ROOT, projectId);
   await ensureDir(base);
   const pagesDir = path.join(base, 'pages');
@@ -53,16 +71,23 @@ export async function writeGeneratedProject(projectId: string, blueprint: Bluepr
     const code = comp.code?.trim() ? comp.code : componentTemplate({ identifier: ident });
     const rel = path.join('components', `${fileBase}.tsx`);
     if (includeSet && !includeSet.has(rel)) continue; // skip if not selected
+    const rec: GeneratedFileRecord = { type: 'component', relativePath: rel };
+    streamStart(rec, code); streamChunks(rec, code);
     await fs.writeFile(path.join(base, rel), code, 'utf8');
+    streamEnd(rec);
     barrelLines.push(`export * from './${fileBase}';`);
     componentIdents.push(ident);
-    notify({ type: 'component', relativePath: rel });
+    notify(rec);
   }
   if (barrelLines.length) {
     const barrelRel = path.join('components', 'index.ts');
     if (!includeSet || includeSet.has(barrelRel)) {
-      await fs.writeFile(path.join(base, barrelRel), barrelLines.join('\n') + '\n', 'utf8');
-      notify({ type: 'barrel', relativePath: barrelRel });
+      const code = barrelLines.join('\n') + '\n';
+      const rec: GeneratedFileRecord = { type: 'barrel', relativePath: barrelRel };
+      streamStart(rec, code); streamChunks(rec, code);
+      await fs.writeFile(path.join(base, barrelRel), code, 'utf8');
+      streamEnd(rec);
+      notify(rec);
     }
   }
 
@@ -91,8 +116,11 @@ export async function writeGeneratedProject(projectId: string, blueprint: Bluepr
       componentsList: componentIdents.join(', '),
       componentsImportPath,
     });
+    const rec: GeneratedFileRecord = { type: 'page', relativePath: rel };
+    streamStart(rec, code); streamChunks(rec, code);
     await fs.writeFile(path.join(base, rel), code, 'utf8');
-    notify({ type: 'page', relativePath: rel });
+    streamEnd(rec);
+    notify(rec);
   }
 
   // API routes
@@ -107,8 +135,11 @@ export async function writeGeneratedProject(projectId: string, blueprint: Bluepr
     const rel = path.join(relDir, file);
     if (includeSet && !includeSet.has(rel)) continue;
     const code = api.code?.trim() ? api.code : apiTemplate({ route: api.route });
+    const rec: GeneratedFileRecord = { type: 'api', relativePath: rel };
+    streamStart(rec, code); streamChunks(rec, code);
     await fs.writeFile(path.join(base, rel), code, 'utf8');
-    notify({ type: 'api', relativePath: rel });
+    streamEnd(rec);
+    notify(rec);
   }
 
   // Prisma models
@@ -116,8 +147,11 @@ export async function writeGeneratedProject(projectId: string, blueprint: Bluepr
     const rel = 'models.prisma';
     if (!includeSet || includeSet.has(rel)) {
       const prismaOut = blueprint.prismaModels.map(m => m.definition).join('\n\n');
+      const rec: GeneratedFileRecord = { type: 'prisma', relativePath: rel };
+      streamStart(rec, prismaOut); streamChunks(rec, prismaOut);
       await fs.writeFile(path.join(base, rel), prismaOut, 'utf8');
-      notify({ type: 'prisma', relativePath: rel });
+      streamEnd(rec);
+      notify(rec);
     }
   }
   return created;

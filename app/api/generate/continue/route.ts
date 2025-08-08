@@ -153,7 +153,11 @@ export async function POST(req: Request) {
         );
         push('total', { files: totalFiles });
         let fileCount = 0;
-        await writeGeneratedProject(projectId, blueprint, rec => { fileCount++; push('file', { ...rec, index:fileCount, total: totalFiles }); push('log', { message: `${includePaths? 'Rewrote':'Wrote'} ${rec.relativePath}`, ts: Date.now() }); }, includePaths);
+        await writeGeneratedProject(projectId, blueprint, rec => { fileCount++; push('file', { ...rec, index:fileCount, total: totalFiles }); push('log', { message: `${includePaths? 'Rewrote':'Wrote'} ${rec.relativePath}`, ts: Date.now() }); }, includePaths, {
+          start: (rec, size) => push('file-start', { relativePath: rec.relativePath, type: rec.type, size }),
+          chunk: (rec, chunk) => push('file-chunk', { relativePath: rec.relativePath, chunk }),
+          end: (rec) => push('file-end', { relativePath: rec.relativePath })
+        });
         done('write');
       }
     }
