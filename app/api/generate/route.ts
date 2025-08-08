@@ -61,7 +61,7 @@ async function streamOllamaRaw(prompt: string, params: any, onToken: (t:string)=
   return raw;
 }
 
-async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>void): Promise<string> {
+async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>void, onDebug?:(info:any)=>void): Promise<string> {
   const apiKey = params?.geminiKey || env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('Gemini API key missing');
   const model = params?.model || 'gemini-2.5-flash';
@@ -70,15 +70,19 @@ async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`;
   const body = { contents: [{ parts: [{ text: baseInstruction + '\n' + user }] }] };
   const res = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) throw new Error('Gemini stream failed');
+  if (!res.ok || !res.body) throw new Error(`Gemini stream failed (${res.status})`);
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let raw = '';
   let buffer = '';
+  let lineCount = 0;
+  let objectsParsed = 0;
+  let lastCandidateAt = 0;
   while(true){
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream:true });
+    // Gemini may send multiple JSON objects separated by newlines; accumulate by full line
     const lines = buffer.split(/\n/);
     buffer = lines.pop() || '';
     for (let line of lines) {
@@ -86,18 +90,44 @@ async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>
       if (!line) continue;
       if (line.startsWith('data:')) line = line.slice(5).trim();
       if (!line || line === '[DONE]') continue;
+      lineCount++;
+      if (lineCount <= 5 && onDebug) onDebug({ phase:'gemini-line', line });
       try {
         const obj = JSON.parse(line);
-        const cands = obj?.candidates;
-        if (Array.isArray(cands)) {
-          for (const c of cands) {
-            const textParts = c?.content?.parts?.filter((p:any)=>p?.text).map((p:any)=>p.text) || [];
-            for (const t of textParts) { raw += t; onToken(t); }
+        objectsParsed++;
+        const candArr = obj?.candidates || [];
+        if (Array.isArray(candArr) && candArr.length) {
+          for (const c of candArr) {
+            // candidate-level safety blocks may appear without content
+            const parts = c?.content?.parts || [];
+            for (const p of parts) {
+              if (typeof p?.text === 'string' && p.text) {
+                raw += p.text;
+                lastCandidateAt = Date.now();
+                onToken(p.text);
+              }
+            }
           }
+        } else if (obj?.content?.parts) {
+          // fallback shape
+          for (const p of obj.content.parts) {
+            if (typeof p?.text === 'string') { raw += p.text; lastCandidateAt = Date.now(); onToken(p.text); }
+          }
+        } else if (obj?.promptFeedback && onDebug) {
+          onDebug({ phase:'gemini-feedback', feedback: obj.promptFeedback });
         }
-      } catch { /* ignore partial */ }
+      } catch (e) {
+        if (onDebug) onDebug({ phase:'gemini-parse-error', snippet: line.slice(0,120) });
+      }
+    }
+    // Optional early break if we collected enough raw to look like JSON root
+    if (raw.includes('"pages"') && raw.length > 20000) break;
+    // timeout safeguard: if >8s since first bytes and no candidate text
+    if (!lastCandidateAt && objectsParsed > 3 && raw.length === 0) {
+      // keep going until completion; do not abort yet
     }
   }
+  if (onDebug) onDebug({ phase:'gemini-summary', lines: lineCount, objects: objectsParsed, chars: raw.length });
   return raw;
 }
 
@@ -163,7 +193,7 @@ export async function POST(req: Request) {
     let rawText = '';
     try {
       if (provider === 'gemini') {
-        rawText = await streamGeminiRaw(prompt, params||{}, t => push('token', { text: t, provider:'gemini' }));
+        rawText = await streamGeminiRaw(prompt, params||{}, t => push('token', { text: t, provider:'gemini' }), d => push('debug', d));
       } else {
         rawText = await streamOllamaRaw(prompt, params||{}, t => push('token', { text: t, provider:'ollama' }));
       }
@@ -174,12 +204,20 @@ export async function POST(req: Request) {
 
     // Fallback: if streaming produced no text, use non-streaming unified generation
     if (!rawText.trim()) {
+      push('debug', { phase:'empty-stream', provider, note:'No tokens accumulated from streaming path' });
       try {
         push('log', { message:'Streaming returned empty output, invoking unified generation fallback', ts: Date.now() });
-        const fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
-        // Directly proceed with fallback blueprint
+        let fallbackBp = null;
+        let firstErr: string | null = null;
+        try { fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params); }
+        catch (e:any) { firstErr = e?.message || 'primary provider failed'; }
+        if (!fallbackBp && provider === 'gemini') {
+          // try ollama as second fallback
+            try { fallbackBp = await generateBlueprintUnified(prompt, 'ollama', params); push('log', { message:'Ollama fallback succeeded', ts: Date.now() }); }
+            catch (e2:any) { push('error', { message: `Empty model output; gemini fallback failed (${firstErr}); ollama fallback failed (${e2?.message||'unknown'})` }); return; }
+        }
+        if (!fallbackBp) { push('error', { message:`Empty model output; fallback failed (${firstErr||'unknown'})` }); return; }
         push('log', { message:'Fallback blueprint obtained', ts: Date.now() });
-        // Skip raw parsing path – use fallback blueprint directly
         const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (fallbackBp?.name ? String(fallbackBp.name) : 'Generated Project');
         const project = await prisma.project.create({
           data: { name: projectName, prompt, blueprint: JSON.stringify(fallbackBp), user: { connect: { id: userId } } },
@@ -214,7 +252,7 @@ export async function POST(req: Request) {
         } catch {}
         return; // end streaming handler
       } catch (e:any) {
-        push('error', { message: 'Empty model output and fallback failed' });
+        push('error', { message: 'Empty model output and fallback failed (unexpected)' });
         return;
       }
     }
@@ -226,9 +264,11 @@ export async function POST(req: Request) {
       push('log', { message: 'Primary parse failed, attempting unified fallback', ts: Date.now() });
       try {
         blueprint = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
-      } catch {
-        push('error', { message: e?.message || 'Parse failed' });
-        return;
+      } catch (gErr:any) {
+        if (provider === 'gemini') {
+          try { blueprint = await generateBlueprintUnified(prompt, 'ollama', params); push('log', { message:'Ollama secondary fallback succeeded', ts: Date.now() }); }
+          catch (oErr:any) { push('error', { message: `Parse failed: ${e?.message}; gemini fallback failed: ${gErr?.message}; ollama fallback failed: ${oErr?.message}` }); return; }
+        } else { push('error', { message: e?.message || 'Parse failed' }); return; }
       }
     }
 
