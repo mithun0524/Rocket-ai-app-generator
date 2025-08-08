@@ -338,79 +338,79 @@ export default function DashboardPage() {
     </div>
   );
 
+  const runParamsBar = (
+    <div className='mt-2 flex flex-wrap gap-2 text-[10px]'>
+      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Provider: <span className='text-fuchsia-300'>{provider}</span></span>
+      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Temp {temperature}</span>
+      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Top P {topP}</span>
+      <span className='px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-gray-300'>Max {maxTokens}</span>
+      {projectId && <span className='px-2 py-0.5 rounded-md bg-gradient-to-r from-fuchsia-600/30 to-pink-600/30 border border-fuchsia-500/30 text-fuchsia-200'>Project {projectId.slice(0,6)}</span>}
+    </div>
+  );
+
   // FEED PANEL CONTENT
   const FeedPanel = (
     <div className='flex flex-col h-full'>
       {/* Header */}
-      <div className='flex items-center justify-between mb-4'>
-        <h2 className='text-sm font-semibold tracking-wide text-fuchsia-300'>Rocket</h2>
+      <div className='flex items-center justify-between mb-4 relative'>
+        <div className='flex flex-col'>
+          <h2 className='text-sm font-semibold tracking-wide text-fuchsia-300 flex items-center gap-2'>
+            <span className='relative'>
+              <span className='absolute inset-0 blur-lg bg-fuchsia-600/30 rounded-md -z-10' />
+              <span className='bg-gradient-to-r from-fuchsia-400 via-pink-400 to-cyan-300 bg-clip-text text-transparent'>Rocket Dashboard</span>
+            </span>
+          </h2>
+          <span className='text-[10px] text-gray-500 mt-0.5'>Streaming code generation & iteration</span>
+        </div>
         <div className='flex gap-2'>
-          {loading && <button onClick={abortGeneration} className='px-2 py-1 rounded bg-red-600/70 hover:bg-red-600 text-[10px] text-white'>Abort</button>}
+          {loading && <button onClick={abortGeneration} className='px-2 py-1 rounded bg-red-600/70 hover:bg-red-600 text-[10px] text-white shadow shadow-red-900/40'>Abort</button>}
           <Link href='/projects' className='text-[10px] text-gray-400 hover:text-fuchsia-300 underline'>Projects</Link>
         </div>
       </div>
       {/* Prompt */}
-      <form onSubmit={generate} className='mb-4 space-y-3'>
-        <label className='text-[11px] uppercase tracking-wide text-gray-400 font-medium'>Prompt</label>
-        <div className='rounded-lg glow-ring p-[1px]'>
-          <div className='rounded-lg bg-black/40 backdrop-blur-sm border border-white/5 relative'>
-            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-36 resize-none bg-transparent rounded-lg p-3 outline-none text-xs leading-relaxed pr-14' placeholder='Describe your app, features, entities, pages…' />
-            {loading && <div className='absolute top-2 right-2 text-[10px] text-fuchsia-300'>{Math.max(progress, derivedProgress)}%</div>}
+      <form onSubmit={generate} className='mb-4 space-y-3 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md px-3 pt-3 pb-4 shadow-inner shadow-black/40 gradient-border'>
+        <label className='text-[11px] uppercase tracking-wide text-gray-400 font-medium flex items-center justify-between'>
+          <span>Prompt</span>
+          {doneSteps>0 && <span className='text-[9px] text-gray-500 font-normal'>{doneSteps}/{totalSteps} steps</span>}
+        </label>
+        <div className='rounded-lg glow-ring p-[1px] bg-gradient-to-br from-fuchsia-500/20 via-pink-500/10 to-cyan-500/20'>
+          <div className='rounded-lg bg-black/60 backdrop-blur border border-white/10 relative'>
+            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-32 resize-none bg-transparent rounded-lg p-3 outline-none text-xs leading-relaxed pr-16 placeholder:text-gray-600' placeholder='Describe your app, features, entities, pages…' />
+            {loading && <div className='absolute top-2 right-2 text-[10px] text-fuchsia-300 font-medium'>{Math.max(progress, derivedProgress)}%</div>}
             {(loading || derivedProgress>0) && (
               <div className='h-1 w-full bg-gray-800/60 overflow-hidden rounded-b-lg'>
-                <div className='h-full bg-gradient-to-r from-fuchsia-500 via-pink-500 to-indigo-500 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
+                <div className='h-full bg-gradient-to-r from-fuchsia-500 via-pink-500 to-cyan-400 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
               </div>
             )}
           </div>
         </div>
-        <div className='flex flex-wrap gap-2'>
-          <div className='flex items-stretch gap-2 flex-1 min-w-[140px]'>
-            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-2 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[11px] text-gray-200'>
+        <div className='flex flex-wrap gap-3 items-stretch'>
+          <div className='flex items-stretch gap-2 flex-1 min-w-[160px]'>
+            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-2 py-2.5 rounded-md bg-gray-900/70 border border-white/10 text-[11px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500'>
               <option value='ollama'>Ollama (local)</option>
               <option value='gemini'>Gemini (cloud)</option>
             </select>
-            <button disabled={loading} className='flex-1 px-4 py-2.5 rounded-md bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 disabled:opacity-50 text-[11px] font-semibold shadow shadow-fuchsia-900/30'>{loading? 'Generating…':'Generate'}</button>
+            <button disabled={loading} className='flex-1 px-4 py-2.5 rounded-md bg-gradient-to-r from-fuchsia-600 via-pink-600 to-indigo-600 hover:from-fuchsia-500 hover:via-pink-500 hover:to-indigo-500 disabled:opacity-50 text-[11px] font-semibold shadow shadow-fuchsia-900/40 ring-1 ring-white/10'>
+              {loading? 'Generating…':'Generate'}
+            </button>
           </div>
-          <div className='flex flex-col gap-1 flex-[2_1_100%]'>
-            <div className='grid grid-cols-3 gap-2'>
-              <label className='flex flex-col gap-1'>
-                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Temp {temperature}</span>
-                <input type='range' min={0} max={1} step={0.05} value={temperature} onChange={e=> setTemperature(parseFloat(e.target.value))} />
-              </label>
-              <label className='flex flex-col gap-1'>
-                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Top P {topP}</span>
-                <input type='range' min={0} max={1} step={0.05} value={topP} onChange={e=> setTopP(parseFloat(e.target.value))} />
-              </label>
-              <label className='flex flex-col gap-1'>
-                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Max {maxTokens}</span>
-                <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-800 border border-gray-700 rounded px-1 py-1 text-[10px] text-gray-200' />
-              </label>
-            </div>
+          <div className='grid grid-cols-3 gap-3 flex-1 min-w-[220px]'>
+            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Temp <span className='text-fuchsia-300'>{temperature}</span></span>
+              <input type='range' min={0} max={1} step={0.05} value={temperature} onChange={e=> setTemperature(parseFloat(e.target.value))} />
+            </label>
+            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Top P <span className='text-fuchsia-300'>{topP}</span></span>
+              <input type='range' min={0} max={1} step={0.05} value={topP} onChange={e=> setTopP(parseFloat(e.target.value))} />
+            </label>
+            <label className='flex flex-col gap-1 text-[10px] text-gray-400'>
+              <span className='uppercase tracking-wide flex justify-between'>Max <span className='text-fuchsia-300'>{maxTokens}</span></span>
+              <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-900/70 border border-white/10 rounded px-1 py-1 text-[10px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500' />
+            </label>
           </div>
         </div>
-        {selectiveMode && continueStep==='write' && createdFiles.length>0 && (
-          <div className='border border-amber-500/40 rounded p-2 max-h-40 overflow-auto space-y-1 bg-amber-950/20'>
-            <div className='text-[10px] text-amber-300 font-semibold mb-1'>Select files to rewrite ({selectedFiles.size || 'none'})</div>
-            {createdFiles.slice(0,120).map(f=> {
-              const checked = selectedFiles.has(f.relativePath);
-              return (
-                <label key={f.relativePath} className='flex items-center gap-2 text-[10px] text-gray-300'>
-                  <input type='checkbox' className='accent-amber-500' checked={checked} onChange={()=> {
-                    setSelectedFiles(prev=> {
-                      const next = new Set(prev); if (next.has(f.relativePath)) next.delete(f.relativePath); else next.add(f.relativePath); return next; });
-                  }} />
-                  <span className='truncate'>{f.relativePath}</span>
-                </label>
-              );
-            })}
-            {createdFiles.length>120 && <div className='text-[10px] text-gray-500'>…more</div>}
-            <div className='flex gap-2 pt-1'>
-              <button type='button' onClick={()=> setSelectedFiles(new Set(createdFiles.map(f=>f.relativePath)))} className='px-2 py-0.5 rounded bg-gray-800 text-[10px]'>All</button>
-              <button type='button' onClick={()=> setSelectedFiles(new Set())} className='px-2 py-0.5 rounded bg-gray-800 text-[10px]'>None</button>
-            </div>
-          </div>
-        )}
-        {error && <div className='text-[11px] text-red-400'>{error}</div>}
+        {runParamsBar}
+        {error && <div className='text-[11px] text-red-400 font-medium pt-1'>{error}</div>}
       </form>
       {/* Steps */}
       <div className='space-y-4 overflow-y-auto pr-1 flex-1'>
@@ -441,7 +441,11 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {DiffPanel}
+        {DiffPanel && (
+          <div className='animate-subtle-float'>
+            {DiffPanel}
+          </div>
+        )}
 
         {createdFiles.length > 0 && (
           <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
