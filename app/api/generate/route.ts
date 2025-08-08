@@ -175,10 +175,44 @@ export async function POST(req: Request) {
     // Fallback: if streaming produced no text, use non-streaming unified generation
     if (!rawText.trim()) {
       try {
-        push('log', { message:'Streaming returned empty output, falling back to non-streaming generation', ts: Date.now() });
+        push('log', { message:'Streaming returned empty output, invoking unified generation fallback', ts: Date.now() });
         const fallbackBp = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
-        // serialize fallback blueprint to rawText for downstream parsing path
-        rawText = JSON.stringify({ ...fallbackBp });
+        // Directly proceed with fallback blueprint
+        push('log', { message:'Fallback blueprint obtained', ts: Date.now() });
+        // Skip raw parsing path – use fallback blueprint directly
+        const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (fallbackBp?.name ? String(fallbackBp.name) : 'Generated Project');
+        const project = await prisma.project.create({
+          data: { name: projectName, prompt, blueprint: JSON.stringify(fallbackBp), user: { connect: { id: userId } } },
+        });
+        push('meta', { projectId: project.id });
+        push('step', { id:'parse', status:'done' });
+        push('step', { id:'plan', status:'done', label:'Planning blueprint' });
+        push('step', { id:'validate', status:'done', label:'Validating schema' });
+        push('step', { id:'write', status:'active', label:'Writing files' });
+        const totalFiles = (
+          (fallbackBp.components?.length || 0) +
+          (fallbackBp.pages?.length || 0) +
+          (fallbackBp.apiRoutes?.length || 0) +
+          (fallbackBp.components?.length ? 1 : 0) +
+          (fallbackBp.prismaModels?.length ? 1 : 0)
+        );
+        push('total', { files: totalFiles });
+        let fileCount = 0;
+        await writeGeneratedProject(project.id, fallbackBp, rec => { fileCount++; push('file', { ...rec, index: fileCount, total: totalFiles }); push('log', { message: `Created ${rec.relativePath}`, ts: Date.now() }); }, undefined, {
+          start: (rec, size) => push('file-start', { relativePath: rec.relativePath, type: rec.type, size }),
+          chunk: (rec, chunk) => push('file-chunk', { relativePath: rec.relativePath, chunk }),
+          end: (rec) => push('file-end', { relativePath: rec.relativePath })
+        });
+        push('step', { id:'write', status:'done' });
+        push('step', { id:'final', status:'done', label:'Finalizing project' });
+        push('blueprint', fallbackBp);
+        push('complete', { projectId: project.id });
+        push('log', { message: 'Generation complete (fallback path)', ts: Date.now() });
+        try {
+          const stepMetrics = JSON.stringify({ steps: ['parse','plan','validate','write','final'].map(id=>({ id, ms: null })) });
+          await prisma.run.create({ data: { projectId: project.id, provider: provider==='gemini'?'gemini':'ollama', files: fileCount, stepMetrics, diff: null, params: params? JSON.stringify(params): null } });
+        } catch {}
+        return; // end streaming handler
       } catch (e:any) {
         push('error', { message: 'Empty model output and fallback failed' });
         return;
@@ -189,8 +223,13 @@ export async function POST(req: Request) {
     try {
       blueprint = await parseRawToBlueprint(rawText, prompt, provider==='gemini'?'gemini':'ollama');
     } catch (e:any) {
-      push('error', { message: e?.message || 'Parse failed' });
-      return;
+      push('log', { message: 'Primary parse failed, attempting unified fallback', ts: Date.now() });
+      try {
+        blueprint = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
+      } catch {
+        push('error', { message: e?.message || 'Parse failed' });
+        return;
+      }
     }
 
     push('log', { message: 'Blueprint generated', ts: Date.now() });
