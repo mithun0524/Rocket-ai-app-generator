@@ -6,6 +6,10 @@ const memoryStore = new Map<string, Bucket>();
 const WINDOW_MS = 60_000;
 const LIMIT = 10; // increased global limit for future multi-feature use
 
+export const __RATE_LIMIT_WINDOW_MS = WINDOW_MS; // test visibility
+export const __RATE_LIMIT_MAX = LIMIT; // test visibility
+export function __resetRateLimiter() { memoryStore.clear(); } // test helper
+
 export async function checkRate(key: string) {
   const now = Date.now();
   const bucket = memoryStore.get(key);

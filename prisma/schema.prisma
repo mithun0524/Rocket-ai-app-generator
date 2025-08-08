@@ -63,5 +63,19 @@ model Project {
   status      String   @default("draft")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  runs        Run[]
   @@index([userId, createdAt])
+}
+
+model Run {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  provider   String
+  stepMetrics String  // JSON stringified metrics
+  files      Int
+  diff       String?  // JSON stringified diff summary
+  params     String?  // JSON stringified model params
+  createdAt  DateTime @default(now())
+  @@index([projectId, createdAt])
 }

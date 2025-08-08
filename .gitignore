@@ -1,15 +1,59 @@
-﻿.next/
+﻿# Dependencies
 node_modules/
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+
+# Next.js build outputs
+.next/
+out/
+.dist/
+
+# Build / dist
+build/
+dist/
+
+# Generated project output (AI)
+generated/
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Lock files (intentionally ignored)
 package-lock.json
-dist/
-generated/
+pnpm-lock.yaml
+bun.lockb
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Prisma local dev DB
+prisma/dev.db
+prisma/dev.db-journal
 *.sqlite
 *.sqlite-journal
+
+# Cache / misc
+.eslintcache
+.turbo/
+.vercel/
+coverage/
+.nyc_output/
+
+# Archives
+*.tgz
+
+# Swap/temp
+*.swp
+*.tmp

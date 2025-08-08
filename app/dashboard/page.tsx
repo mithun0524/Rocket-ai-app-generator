@@ -1,190 +1,575 @@
 'use client';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import VSCodeShell from '@/components/vscode/VSCodeShell';
 
-interface CreatedFile { type: string; relativePath: string; }
+interface CreatedFile { relativePath: string; type: string }
+interface Step { id: string; label: string; status: 'pending' | 'active' | 'done' | 'error'; note?: string }
 
 export default function DashboardPage() {
-  const [prompt, setPrompt] = useState('Simple todo app with add/remove and persistence');
+  // Prompt & generation state
+  const [prompt, setPrompt] = useState('Realtime multiplayer drawing game with rooms, lobby, drawing phase, voting phase');
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [blueprint, setBlueprint] = useState<any>(null);
-  const [files, setFiles] = useState<string[]>([]);
-  const [activeFile, setActiveFile] = useState<string>('pages/index.tsx');
-  const [fileContent, setFileContent] = useState<string>('');
-  const [previewHtml, setPreviewHtml] = useState<string>('');
   const [createdFiles, setCreatedFiles] = useState<CreatedFile[]>([]);
+  const [blueprint, setBlueprint] = useState<any>(null);
+  const [progress, setProgress] = useState(0);
+  const [showFiles, setShowFiles] = useState(true);
+  const [showBlueprint, setShowBlueprint] = useState(false);
+  const [steps, setSteps] = useState<Step[]>([]);
+  const stepsRef = useRef<Step[]>([]);
+  const [activeTab, setActiveTab] = useState<'feed' | 'editor'>('feed'); // mobile switching
+  const [logs, setLogs] = useState<{ ts:number; message:string }[]>([]);
+  const [totalFiles, setTotalFiles] = useState<number | null>(null);
+  const [continueStep, setContinueStep] = useState<'parse'|'plan'|'validate'|'write'>('write');
+  const [blueprintDiff, setBlueprintDiff] = useState<any|null>(null);
+  const [stepTimings, setStepTimings] = useState<Record<string,{start?:number; end?:number}>>({});
+  const [runHistory, setRunHistory] = useState<any[]>([]);
+  const historyRef = useRef<any[]>([]);
+  const controllerRef = useRef<AbortController|null>(null);
+  const [selectiveMode, setSelectiveMode] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [showHistory, setShowHistory] = useState(false);
+  const [showDiff, setShowDiff] = useState(true);
+  const [showDiffDetail, setShowDiffDetail] = useState(false);
+  const [baselineBlueprint, setBaselineBlueprint] = useState<any|null>(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState('');
+  const pendingStepRef = useRef<string|null>(null);
+  const [provider, setProvider] = useState<'ollama' | 'gemini'>('ollama');
+  const [showPreview, setShowPreview] = useState(false);
+  const [temperature, setTemperature] = useState(0.1);
+  const [topP, setTopP] = useState(0.9);
+  const [maxTokens, setMaxTokens] = useState(2048);
 
+  // Derived progress from steps
+  const totalSteps = steps.length;
+  const doneSteps = steps.filter(s=>s.status==='done').length;
+  const derivedProgress = totalSteps? Math.round((doneSteps/totalSteps)*100):0;
+
+  // Init from query
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const pid = params.get('project');
-    if (pid) setProjectId(pid);
+    if (pid) { setProjectId(pid); }
   }, []);
 
-  useEffect(() => {
-    if (!projectId) return;
-    (async () => {
-      const res = await fetch(`/api/files?projectId=${projectId}`);
-      const data = await res.json();
-      if (res.ok) setFiles(data.files || []);
-    })();
-  }, [projectId]);
+  // Animated progress bar (coarse) while loading
+  useEffect(()=> {
+    if (!loading) { setProgress(0); return; }
+    let raf: number;
+    const tick = () => { setProgress(p => Math.min(95, p + Math.max(0.15, (100-p)*0.012))); raf = requestAnimationFrame(tick); };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [loading]);
 
-  useEffect(() => {
-    if (!projectId || !activeFile) return;
-    (async () => {
-      const res = await fetch(`/api/preview?projectId=${projectId}&file=${encodeURIComponent(activeFile)}`);
-      if (res.ok) {
-        const text = await res.text();
-        setFileContent(text);
-      }
-    })();
-  }, [projectId, activeFile]);
-
-  // Build a very lightweight preview HTML (only for pages/index.tsx) from file content
-  useEffect(() => {
-    if (!fileContent || activeFile !== 'pages/index.tsx') {
-      setPreviewHtml('');
-      return;
-    }
-    // Naive transform: strip import/export lines, map default export to Component
-    let src = fileContent
-      .replace(/import[^;]+;\n?/g, '')
-      .replace(/export\s+default\s+function\s+([A-Za-z0-9_]+)?/,'function Component')
-      .replace(/export\s+default\s*\(/,'function Component(')
-      .replace(/export\s+default\s+\(/,'function Component(')
-      .replace(/export\s+default\s+class\s+([A-Za-z0-9_]+)/,'class Component');
-    if (!/Component\s*\(/.test(src) && !/class Component/.test(src)) {
-      // If still no Component, attempt to wrap default export expression
-      if (/export\s+default\s+/.test(fileContent)) {
-        const expr = fileContent.split(/export\s+default\s+/)[1];
-        src = `const Component = ${expr}`;
-      }
-    }
-    const html = `<!doctype html><html><head><meta charset=utf-8 />
-<style>body{font-family:system-ui,Arial,sans-serif;margin:16px}</style>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-</head><body><div id="root">Loading...</div>
-<script type="module">
-${src}\ntry{ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(typeof Component==='function'?Component:()=>React.createElement('pre',null,'No Component export')));}catch(e){document.getElementById('root').innerText='Preview error: '+e.message;console.error(e)}
-</script></body></html>`;
-    setPreviewHtml(html);
-  }, [fileContent, activeFile]);
-
-  async function handleGenerate(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-    setCreatedFiles([]);
-    try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed');
-      setProjectId(data.projectId);
-      setBlueprint(data.blueprint);
-      setCreatedFiles(data.createdFiles || []);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
+  // Helper to update step status
+  function updateStep(id: string, patch: Partial<Step>) {
+    setSteps(prev => {
+      const next = prev.map(s => s.id === id ? { ...s, ...patch } : s);
+      stepsRef.current = next; return next;
+    });
   }
 
-  const iframeSrc = projectId ? `/api/preview?projectId=${projectId}&file=pages/index.tsx` : '';
+  function seedSteps() {
+    const initial: Step[] = [
+      { id: 'parse', label: 'Parsing prompt', status: 'active' },
+      { id: 'plan', label: 'Planning blueprint', status: 'pending' },
+      { id: 'validate', label: 'Validating schema', status: 'pending' },
+      { id: 'write', label: 'Writing files', status: 'pending' },
+      { id: 'final', label: 'Finalizing project', status: 'pending' },
+    ];
+    stepsRef.current = initial; setSteps(initial);
+  }
 
-  return (
-    <div className="flex h-[calc(100vh-2rem)] gap-4 p-4">
-      <div className="absolute top-2 right-4 text-xs"><Link href="/projects" className="underline text-fuchsia-400">Projects</Link></div>
-      <div className="w-1/3 flex flex-col space-y-4">
-        {/* Generation Form */}
-        <form onSubmit={handleGenerate} className="space-y-4">
-          <h1 className="text-2xl font-semibold">Generate App</h1>
-          <textarea
-            className="w-full h-40 p-3 rounded bg-gray-800 border border-gray-700 focus:outline-none focus:ring focus:ring-fuchsia-500 text-sm"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-          />
-          <button
-            className="px-4 py-2 rounded bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50"
-            disabled={loading}
-            type="submit"
-          >
-            {loading ? 'Generating...' : 'Generate'}
-          </button>
-          {error && <p className="text-red-400 text-sm">{error}</p>}
-          {createdFiles.length > 0 && (
-            <div className="bg-gray-900 rounded p-3 max-h-40 overflow-auto text-xs border border-gray-800 space-y-1">
-              <div className="font-semibold text-fuchsia-300 mb-1">Created Files ({createdFiles.length})</div>
-              {createdFiles.map(cf => (
-                <div key={cf.relativePath} className="flex justify-between gap-2">
-                  <span className="truncate">{cf.relativePath}</span>
-                  <span className="text-gray-500">{cf.type}</span>
+  async function simulateEarlySteps(controller: AbortController) {
+    // Sequentially advance first three steps while request in flight
+    const advance = async (from: string, to: string, delay: number) => {
+      await new Promise(r=>setTimeout(r, delay)); if (controller.signal.aborted) return; updateStep(from, { status: 'done' }); updateStep(to, { status: 'active' }); };
+    await advance('parse','plan',400);
+    await advance('plan','validate',500);
+    updateStep('validate',{ status:'active' });
+  }
+
+  // helper to reset controller
+  function newController() {
+    if (controllerRef.current) controllerRef.current.abort();
+    const c = new AbortController();
+    controllerRef.current = c; return c;
+  }
+
+  // track step timing
+  function markStepStart(id:string){ setStepTimings(t=> ({ ...t, [id]: { ...(t[id]||{}), start: Date.now() } })); }
+  function markStepEnd(id:string){ setStepTimings(t=> ({ ...t, [id]: { ...(t[id]||{}), end: Date.now() } })); }
+
+  async function generate(e: React.FormEvent) {
+    e.preventDefault();
+    const controller = newController();
+    setLoading(true); setError(null); setCreatedFiles([]); setBlueprint(null); setProjectId(null);
+    setSteps([]); stepsRef.current = []; setLogs([]); setTotalFiles(null); setProgress(0); setBlueprintDiff(null); setStepTimings({}); setSelectiveMode(false); setSelectedFiles(new Set());
+
+    try {
+      const res = await fetch('/api/generate?stream=1', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ prompt, provider, params:{ temperature, top_p: topP, max_tokens: maxTokens } }), signal: controller.signal });
+      if (!res.ok || !res.body) throw new Error('Failed to start generation');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const upsertStep = (id:string, data: Partial<Step>) => {
+        const { label: dl, status: ds, note } = (data || {}) as Partial<Step>;
+        setSteps((prev: Step[]) => {
+          const existing: Step | undefined = prev.find(s=>s.id===id);
+          if (existing) return prev.map(s=> {
+            if (s.id===id) {
+              const newStatus = (data as any).status || s.status;
+              if (newStatus==='active' && s.status!=='active') markStepStart(id);
+              if (newStatus==='done' && s.status!=='done') markStepEnd(id);
+              return { ...s, ...(data as Partial<Step>) } as Step;
+            }
+            return s;
+          });
+          const label: string = dl ?? id;
+          const status: Step['status'] = (ds as Step['status']) || 'pending';
+          if (status==='active') markStepStart(id);
+          return [...prev, { id, label, status, ...(note?{note}:{}) }];
+        });
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream:true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          const lines = part.split('\n').filter(Boolean);
+            let eventName = ''; let dataLine = '';
+            for (const l of lines) {
+              if (l.startsWith('event:')) eventName = l.slice(6).trim();
+              else if (l.startsWith('data:')) dataLine += l.slice(5).trim();
+            }
+            if (!eventName) continue;
+            try {
+              const payload = dataLine ? JSON.parse(dataLine) : {};
+              if (eventName==='step') { upsertStep(payload.id, payload); }
+              else if (eventName==='file') { setCreatedFiles(f=>{ const next=[...f, payload]; if (totalFiles) { setProgress(Math.round((next.length/totalFiles)*100)); } return next; }); }
+              else if (eventName==='total') { setTotalFiles(payload.files || 0); }
+              else if (eventName==='meta' && payload.projectId) { setProjectId(payload.projectId); }
+              else if (eventName==='blueprint') { setBlueprint(payload); }
+              else if (eventName==='diff') { setBlueprintDiff(payload); }
+              else if (eventName==='log') { setLogs(l=>[...l, payload]); }
+              else if (eventName==='error') { setError(payload.message || 'Error'); }
+              else if (eventName==='complete') { setProgress(100); finalizeRun(); }
+            } catch {}
+        }
+      }
+    } catch (e:any) {
+      if (e.name !== 'AbortError') setError(e.message);
+    } finally { setLoading(false); }
+  }
+
+  function finalizeRun(){
+    const summary = Object.entries(stepTimings).map(([id,t])=> ({ id, ms: t.start && t.end ? (t.end - t.start): null }));
+    const record = { ts: Date.now(), projectId, steps: summary, files: createdFiles.length, diff: blueprintDiff };
+    historyRef.current = [record, ...historyRef.current.slice(0,19)];
+    setRunHistory(historyRef.current);
+    // fire and forget refresh
+    if (projectId) { fetch(`/api/runs?projectId=${projectId}`).then(r=> r.json().then(data=> { if (data.runs) setRunHistory(data.runs); }).catch(()=>{})); }
+  }
+
+  useEffect(()=> {
+    async function loadRuns(){
+      if (!projectId) return;
+      try { const res = await fetch(`/api/runs?projectId=${projectId}`); if (!res.ok) return; const data = await res.json(); setRunHistory(data.runs || []); historyRef.current = data.runs || []; }
+      catch {}
+    }
+    loadRuns();
+  }, [projectId]);
+
+  async function continueFrom(stepId: string) {
+    if (!projectId) return;
+    // capture baseline blueprint for diff (only if changing earlier steps or we may want to compare)
+    if (['parse','plan','validate'].includes(stepId) && blueprint) setBaselineBlueprint(blueprint);
+    const controller = newController();
+    setLoading(true); setError(null);
+    try {
+      const include = stepId==='write' && selectiveMode && selectedFiles.size ? `&include=${encodeURIComponent(Array.from(selectedFiles).join(','))}`:'',
+      res = await fetch(`/api/generate/continue?projectId=${projectId}&step=${stepId}${include}&provider=${provider}&temperature=${temperature}&top_p=${topP}&max_tokens=${maxTokens}`, { method:'POST', signal: controller.signal });
+      if (!res.ok || !res.body) throw new Error('Failed to start continuation');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer='';
+      const upsertStep = (id:string, data: Partial<Step>) => {
+        const { label: dl, status: ds, note } = (data || {}) as Partial<Step>;
+        setSteps((prev: Step[]) => {
+          const existing: Step | undefined = prev.find(s=>s.id===id);
+          if (existing) return prev.map(s=> {
+            if (s.id===id){
+              const newStatus = (data as any).status || s.status;
+              if (newStatus==='active' && s.status!=='active') markStepStart(id);
+              if (newStatus==='done' && s.status!=='done') markStepEnd(id);
+              return { ...s, ...(data as Partial<Step>) } as Step;
+            }
+            return s;
+          });
+          const label: string = dl ?? id;
+          const status: Step['status'] = (ds as Step['status']) || 'pending';
+            if (status==='active') markStepStart(id);
+          return [...prev, { id, label, status, ...(note?{note}:{}) }];
+        });
+      };
+      setCreatedFiles([]); setLogs([]); setTotalFiles(null); setProgress(0); setBlueprintDiff(null); setStepTimings({});
+      while(true){
+        const { value, done } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream:true });
+        const parts = buffer.split('\n\n'); buffer = parts.pop() || '';
+        for(const part of parts){
+          const lines = part.split('\n').filter(Boolean); let eventName=''; let dataLine='';
+          for (const l of lines){ if (l.startsWith('event:')) eventName = l.slice(6).trim(); else if (l.startsWith('data:')) dataLine += l.slice(5).trim(); }
+          if(!eventName) continue; try {
+            const payload = dataLine? JSON.parse(dataLine):{};
+            if(eventName==='step') upsertStep(payload.id, payload);
+            else if(eventName==='file') setCreatedFiles(f=>{ const next=[...f, payload]; if (totalFiles) setProgress(Math.round((next.length/totalFiles)*100)); return next; });
+            else if(eventName==='total') setTotalFiles(payload.files||0);
+            else if(eventName==='log') setLogs(l=>[...l, payload]);
+            else if(eventName==='blueprint') setBlueprint(payload);
+            else if(eventName==='diff') setBlueprintDiff(payload);
+            else if(eventName==='complete') { setProgress(100); finalizeRun(); }
+          } catch {}
+        }
+      }
+    } catch(e:any) { if (e.name!=='AbortError') setError(e.message); } finally { setLoading(false); }
+  }
+
+  function abortGeneration(){ if (controllerRef.current) { controllerRef.current.abort(); setLoading(false); setLogs(l=>[...l,{ ts:Date.now(), message:'Aborted by user'}]); } }
+
+  // derive pretty durations
+  function fmtMs(ms:number|null|undefined){ if(ms==null) return '—'; if (ms<1000) return ms+'ms'; const s=(ms/1000); return (s>=10? s.toFixed(1): s.toFixed(2))+'s'; }
+
+  const Caret = ({open}:{open:boolean}) => (
+    <svg className={`w-3 h-3 transition-transform ${open? 'rotate-90':''}`} viewBox="0 0 20 20" fill="currentColor"><path d="M6 4l8 6-8 6V4z"/></svg>
+  );
+  const FileIcon = () => (<svg className='w-3.5 h-3.5 text-gray-400' viewBox='0 0 20 20' fill='currentColor'><path d="M4 2h6l6 6v10H4V2z"/></svg>);
+
+  const StatusIcon = ({status}:{status:Step['status']}) => {
+    if (status==='done') return <svg className='w-4 h-4 text-emerald-400' viewBox='0 0 20 20' fill='currentColor'><path d='M8.5 13.3L4.7 9.5l1.4-1.4 2.4 2.4 5.4-5.4 1.4 1.4-6.8 6.8z'/></svg>;
+    if (status==='active') return <div className='w-4 h-4 border-2 border-fuchsia-400 border-t-transparent rounded-full animate-spin'/>;
+    if (status==='error') return <svg className='w-4 h-4 text-red-400' viewBox='0 0 24 24' fill='currentColor'><path d='M11 7h2v6h-2zm0 8h2v2h-2z'/><path d='M12 2 1 21h22L12 2z'/></svg>;
+    return <div className='w-4 h-4 rounded-full bg-gray-700/60'/>
+  };
+
+  // Diff side-by-side viewer (simple JSON pretty print)
+  function renderDiffDetail(){
+    if (!baselineBlueprint || !blueprint) return null;
+    return (
+      <div className='grid grid-cols-2 gap-2 text-[10px] max-h-56 overflow-auto border-t border-gray-800/60'>
+        <div className='p-2'>
+          <div className='text-fuchsia-300 font-semibold mb-1'>Old</div>
+          <pre className='whitespace-pre-wrap leading-snug opacity-80'>{JSON.stringify(baselineBlueprint,null,2)}</pre>
+        </div>
+        <div className='p-2'>
+          <div className='text-emerald-300 font-semibold mb-1'>New</div>
+          <pre className='whitespace-pre-wrap leading-snug opacity-80'>{JSON.stringify(blueprint,null,2)}</pre>
+        </div>
+      </div>
+    );
+  }
+
+  const DiffPanel = blueprintDiff && (
+    <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
+      <button onClick={()=>setShowDiff(d=>!d)} className='w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold text-fuchsia-300 hover:bg-gray-900/40'>
+        <span>Blueprint Diff</span>
+        <span className='flex items-center gap-3 text-[10px]'>
+          <span className='text-emerald-400'>+{blueprintDiff.added}</span>
+          <span className='text-red-400'>-{blueprintDiff.removed}</span>
+          <span className='text-amber-400'>±{blueprintDiff.changed}</span>
+          <span className='text-gray-500'>{showDiff? '−':'+'}</span>
+        </span>
+      </button>
+      {showDiff && (
+        <div className='text-[10px]'>
+          <div className='max-h-32 overflow-auto px-3 pb-2 space-y-1'>
+            {blueprintDiff.details && blueprintDiff.details.length ? (
+              blueprintDiff.details.slice(0,120).map((d:any,idx:number)=>(
+                <div key={idx} className='flex items-start gap-2'>
+                  <span className={`px-1 rounded text-[9px] font-mono ${d.type==='added'? 'bg-emerald-900/40 text-emerald-300': d.type==='removed'? 'bg-red-900/40 text-red-300': d.type==='changed'? 'bg-amber-900/40 text-amber-300':'bg-gray-800/60 text-gray-400'}`}>{d.type[0].toUpperCase()}</span>
+                  <div className='flex-1 truncate'>
+                    <span className='text-gray-300'>{d.path || '(root)'}</span>
+                    {d.type==='changed' && <span className='text-gray-500 ml-1'>updated</span>}
+                    {d.type==='type-changed' && <span className='text-gray-500 ml-1'>type change</span>}
+                  </div>
                 </div>
-              ))}
+              ))
+            ) : blueprintDiff.paths && blueprintDiff.paths.length? (
+              blueprintDiff.paths.map((p:string)=>(<div key={p} className='text-gray-400'>{p}</div>))
+            ) : <div className='text-gray-500 italic'>No paths changed</div>}
+          </div>
+          {baselineBlueprint && blueprint && (
+            <div className='border-t border-gray-800/60'>
+              <button onClick={()=> setShowDiffDetail(v=>!v)} className='w-full text-left px-3 py-2 text-[10px] font-medium flex justify-between items-center hover:bg-gray-900/50'>
+                <span>Side-by-side JSON</span>
+                <span className='text-gray-500'>{showDiffDetail? 'Hide':'Show'}</span>
+              </button>
+              {showDiffDetail && renderDiffDetail()}
             </div>
           )}
-          {blueprint && (
-            <details className="bg-gray-900 rounded p-3 text-xs whitespace-pre-wrap max-h-52 overflow-auto">
-              <summary className="cursor-pointer">Blueprint JSON</summary>
-              {JSON.stringify(blueprint, null, 2)}
-            </details>
-          )}
-          {projectId && (
-            <a
-              href={`/api/download?projectId=${projectId}`}
-              className="inline-block mt-2 text-sm underline text-fuchsia-400 hover:text-fuchsia-300"
-            >
-              Download Project ZIP
-            </a>
-          )}
-        </form>
-        {/* File Explorer */}
-        {projectId && (
-          <div className="flex-1 min-h-0 flex flex-col border border-gray-800 rounded">
-            <div className="px-3 py-2 text-xs font-semibold bg-gray-800 border-b border-gray-700">Files</div>
-            <div className="overflow-auto text-xs flex-1">
-              {files.length === 0 && <div className="p-3 text-gray-500">No files</div>}
-              <ul>
-                {files.map(f => (
-                  <li key={f}>
-                    <button
-                      onClick={() => setActiveFile(f)}
-                      className={`w-full text-left px-3 py-1 hover:bg-gray-800 ${f === activeFile ? 'bg-gray-800 text-fuchsia-400' : ''}`}
-                    >
-                      {f}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+        </div>
+      )}
+    </div>
+  );
+
+  const HistoryPanel = runHistory.length>0 && (
+    <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
+      <button onClick={()=>setShowHistory(s=>!s)} className='w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold text-fuchsia-300 hover:bg-gray-900/40'>Run History<span className='text-[10px] text-gray-400'>{runHistory.length}</span></button>
+      {showHistory && (
+        <div className='max-h-56 overflow-auto text-[10px] px-3 pb-3 space-y-2'>
+          {runHistory.map(r=> (
+            <div key={r.ts} className='border border-gray-800/60 rounded p-2 space-y-1'>
+              <div className='flex justify-between'><span className='text-gray-300'>{new Date(r.ts).toLocaleTimeString()}</span><span className='text-gray-500'>{r.files} files</span></div>
+              <div className='flex flex-wrap gap-2'>
+                {r.steps.map((s:any)=> <span key={s.id} className='px-1.5 py-0.5 rounded bg-gray-800 text-gray-300'>{s.id}:{fmtMs(s.ms)}</span>)}
+              </div>
+              {r.diff && <div className='text-[9px] text-gray-500'>Δ +{r.diff.added} -{r.diff.removed} ±{r.diff.changed}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  // FEED PANEL CONTENT
+  const FeedPanel = (
+    <div className='flex flex-col h-full'>
+      {/* Header */}
+      <div className='flex items-center justify-between mb-4'>
+        <h2 className='text-sm font-semibold tracking-wide text-fuchsia-300'>Rocket</h2>
+        <div className='flex gap-2'>
+          {loading && <button onClick={abortGeneration} className='px-2 py-1 rounded bg-red-600/70 hover:bg-red-600 text-[10px] text-white'>Abort</button>}
+          <Link href='/projects' className='text-[10px] text-gray-400 hover:text-fuchsia-300 underline'>Projects</Link>
+        </div>
+      </div>
+      {/* Prompt */}
+      <form onSubmit={generate} className='mb-4 space-y-3'>
+        <label className='text-[11px] uppercase tracking-wide text-gray-400 font-medium'>Prompt</label>
+        <div className='rounded-lg glow-ring p-[1px]'>
+          <div className='rounded-lg bg-black/40 backdrop-blur-sm border border-white/5 relative'>
+            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} className='w-full h-36 resize-none bg-transparent rounded-lg p-3 outline-none text-xs leading-relaxed pr-14' placeholder='Describe your app, features, entities, pages…' />
+            {loading && <div className='absolute top-2 right-2 text-[10px] text-fuchsia-300'>{Math.max(progress, derivedProgress)}%</div>}
+            {(loading || derivedProgress>0) && (
+              <div className='h-1 w-full bg-gray-800/60 overflow-hidden rounded-b-lg'>
+                <div className='h-full bg-gradient-to-r from-fuchsia-500 via-pink-500 to-indigo-500 transition-all' style={{ width: Math.max(progress, derivedProgress)+'%' }} />
+              </div>
+            )}
+          </div>
+        </div>
+        <div className='flex flex-wrap gap-2'>
+          <div className='flex items-stretch gap-2 flex-1 min-w-[140px]'>
+            <select value={provider} onChange={e=> setProvider(e.target.value as 'ollama'|'gemini')} className='px-2 py-2.5 rounded-md bg-gray-800 border border-gray-700 text-[11px] text-gray-200'>
+              <option value='ollama'>Ollama (local)</option>
+              <option value='gemini'>Gemini (cloud)</option>
+            </select>
+            <button disabled={loading} className='flex-1 px-4 py-2.5 rounded-md bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 disabled:opacity-50 text-[11px] font-semibold shadow shadow-fuchsia-900/30'>{loading? 'Generating…':'Generate'}</button>
+          </div>
+          <div className='flex flex-col gap-1 flex-[2_1_100%]'>
+            <div className='grid grid-cols-3 gap-2'>
+              <label className='flex flex-col gap-1'>
+                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Temp {temperature}</span>
+                <input type='range' min={0} max={1} step={0.05} value={temperature} onChange={e=> setTemperature(parseFloat(e.target.value))} />
+              </label>
+              <label className='flex flex-col gap-1'>
+                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Top P {topP}</span>
+                <input type='range' min={0} max={1} step={0.05} value={topP} onChange={e=> setTopP(parseFloat(e.target.value))} />
+              </label>
+              <label className='flex flex-col gap-1'>
+                <span className='text-[9px] uppercase text-gray-500 tracking-wide'>Max {maxTokens}</span>
+                <input type='number' min={128} max={8192} step={64} value={maxTokens} onChange={e=> setMaxTokens(parseInt(e.target.value)||2048)} className='bg-gray-800 border border-gray-700 rounded px-1 py-1 text-[10px] text-gray-200' />
+              </label>
+            </div>
+          </div>
+        </div>
+        {selectiveMode && continueStep==='write' && createdFiles.length>0 && (
+          <div className='border border-amber-500/40 rounded p-2 max-h-40 overflow-auto space-y-1 bg-amber-950/20'>
+            <div className='text-[10px] text-amber-300 font-semibold mb-1'>Select files to rewrite ({selectedFiles.size || 'none'})</div>
+            {createdFiles.slice(0,120).map(f=> {
+              const checked = selectedFiles.has(f.relativePath);
+              return (
+                <label key={f.relativePath} className='flex items-center gap-2 text-[10px] text-gray-300'>
+                  <input type='checkbox' className='accent-amber-500' checked={checked} onChange={()=> {
+                    setSelectedFiles(prev=> {
+                      const next = new Set(prev); if (next.has(f.relativePath)) next.delete(f.relativePath); else next.add(f.relativePath); return next; });
+                  }} />
+                  <span className='truncate'>{f.relativePath}</span>
+                </label>
+              );
+            })}
+            {createdFiles.length>120 && <div className='text-[10px] text-gray-500'>…more</div>}
+            <div className='flex gap-2 pt-1'>
+              <button type='button' onClick={()=> setSelectedFiles(new Set(createdFiles.map(f=>f.relativePath)))} className='px-2 py-0.5 rounded bg-gray-800 text-[10px]'>All</button>
+              <button type='button' onClick={()=> setSelectedFiles(new Set())} className='px-2 py-0.5 rounded bg-gray-800 text-[10px]'>None</button>
             </div>
           </div>
         )}
-      </div>
-      <div className="w-2/3 flex flex-col gap-4">
-        <div className="flex-1 flex gap-4">
-          <div className="w-1/2 border border-gray-800 rounded overflow-hidden flex flex-col">
-            <div className="px-3 py-2 text-xs font-semibold bg-gray-800 border-b border-gray-700 flex items-center justify-between">
-              <span>{activeFile}</span>
-            </div>
-            <pre className="flex-1 overflow-auto text-xs p-3 bg-black text-gray-200">{fileContent || 'Select a file'}</pre>
+        {error && <div className='text-[11px] text-red-400'>{error}</div>}
+      </form>
+      {/* Steps */}
+      <div className='space-y-4 overflow-y-auto pr-1 flex-1'>
+        <div>
+          <div className='flex items-center justify-between mb-2'>
+            <h3 className='text-[11px] font-semibold tracking-wide text-gray-300'>Generation Steps</h3>
+            <span className='text-[10px] text-gray-500'>{doneSteps}/{totalSteps}</span>
           </div>
-          <div className="w-1/2 border border-gray-800 rounded overflow-hidden bg-black">
-            {projectId && activeFile === 'pages/index.tsx' && previewHtml ? (
-              <iframe title="live-preview" srcDoc={previewHtml} className="w-full h-full bg-white" />
-            ) : iframeSrc ? (
-              <iframe title="preview" src={iframeSrc} className="w-full h-full bg-white" />
-            ) : (
-              <div className="h-full flex items-center justify-center text-gray-500 text-sm">No preview yet</div>
+          <div className='space-y-2'>
+            {steps.map(s => {
+              const timing = stepTimings[s.id];
+              const ms = timing?.start && timing?.end ? timing.end - timing.start : null;
+              return (
+              <div key={s.id} className='flex items-start gap-2 text-[11px]'>
+                <StatusIcon status={s.status} />
+                <div className='flex-1'>
+                  <div className='flex items-center gap-2'>
+                    <span className='font-medium text-gray-200'>{s.label}</span>
+                    {s.status==='error' && <span className='text-red-400'>Error</span>}
+                    {s.status==='done' && <span className='text-emerald-400'>Done</span>}
+                    {ms!=null && <span className='text-[10px] text-gray-500'>{fmtMs(ms)}</span>}
+                  </div>
+                  {s.note && <div className='text-gray-400'>{s.note}</div>}
+                </div>
+              </div>);
+            })}
+            {!steps.length && <div className='text-[11px] text-gray-500 italic'>No generation yet.</div>}
+          </div>
+        </div>
+
+        {DiffPanel}
+
+        {createdFiles.length > 0 && (
+          <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
+            <button onClick={()=>setShowFiles(s=>!s)} className='w-full flex items-center gap-2 px-3 py-2 text-[11px] font-semibold text-fuchsia-300 hover:bg-gray-900/40'>
+              <Caret open={showFiles} />Files ({createdFiles.length})
+            </button>
+            {showFiles && (
+              <div className='max-h-48 overflow-auto text-[11px] space-y-1 px-3 pb-3'>
+                {createdFiles.slice(0,150).map(f => (
+                  <div key={f.relativePath} className='flex items-center gap-2'><FileIcon /><span className='truncate flex-1'>{f.relativePath}</span><span className='text-gray-500'>{f.type}</span></div>
+                ))}
+                {createdFiles.length > 150 && <div className='text-gray-500 italic'>…more</div>}
+              </div>
             )}
           </div>
+        )}
+
+        {blueprint && (
+          <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
+            <button onClick={()=>setShowBlueprint(b=>!b)} className='w-full flex items-center gap-2 px-3 py-2 text-[11px] font-semibold text-fuchsia-300 hover:bg-gray-900/40'>
+              <Caret open={showBlueprint} />Blueprint
+            </button>
+            {showBlueprint && (
+              <div className='max-h-64 overflow-auto text-[10px] px-3 pb-3'>
+                <pre className='whitespace-pre-wrap leading-snug'>{JSON.stringify(blueprint, null, 2)}</pre>
+              </div>
+            )}
+          </div>
+        )}
+
+        {logs.length > 0 && (
+          <div className='border border-gray-800/70 rounded-md bg-black/40 overflow-hidden'>
+            <div className='px-3 py-2 text-[11px] font-semibold text-fuchsia-300 border-b border-gray-800/60 flex justify-between'>
+              <span>Logs</span>
+              <button onClick={()=> setLogs([])} className='text-[10px] text-gray-500 hover:text-gray-300'>Clear</button>
+            </div>
+            <div className='max-h-40 overflow-auto text-[10px] font-mono leading-4 px-3 py-2 space-y-0'>
+              {logs.slice(-150).map(l => (
+                <div key={l.ts+Math.random()} className='text-gray-400'><span className='text-gray-600'>{new Date(l.ts).toLocaleTimeString()} </span>{l.message}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {HistoryPanel}
+      </div>
+    </div>
+  );
+
+  const EditorPanel = (
+    <div className='h-full w-full relative bg-black/30 backdrop-blur-sm border-t md:border-t-0 md:border-l border-gray-800/60'>
+      {/* Preview toggle */}
+      {projectId && (
+        <div className='absolute top-1 left-2 z-10 flex gap-2'>
+          <button onClick={()=> setShowPreview(p=>!p)} className='px-2 py-1 rounded bg-gray-800/70 hover:bg-gray-700 text-[10px] text-gray-200 border border-gray-700'>{showPreview? 'Code':'Preview'}</button>
+        </div>
+      )}
+      {!projectId && !loading && (
+        <div className='absolute inset-0 flex flex-col items-center justify-center text-xs text-gray-500 gap-3'>
+          <div>No project yet. Generate to start.</div>
+        </div>
+      )}
+      {loading && (
+        <div className='absolute top-2 right-3 text-[10px] px-2 py-1 rounded bg-fuchsia-600/20 border border-fuchsia-500/40 text-fuchsia-200 shadow'>Generating… {Math.max(progress, derivedProgress)}%</div>
+      )}
+      {projectId && !showPreview && <VSCodeShell projectId={projectId} />}
+      {projectId && showPreview && (
+        <iframe key={projectId + String(showPreview)} src={`/api/preview/html?projectId=${projectId}`} className='absolute inset-0 w-full h-full bg-white/5' />
+      )}
+    </div>
+  );
+
+  const ConfirmModal = showConfirm && (
+    <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm'>
+      <div className='w-full max-w-sm bg-gray-900 border border-gray-700 rounded-lg p-4 space-y-4 shadow-xl'>
+        <div className='text-[13px] font-semibold text-fuchsia-300'>Confirm Action</div>
+        <div className='text-[11px] text-gray-300 whitespace-pre-line'>{confirmMessage}</div>
+        <div className='flex justify-end gap-2 pt-2'>
+          <button onClick={cancelAction} className='px-3 py-1.5 text-[11px] rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200'>Cancel</button>
+          <button onClick={confirmAction} className='px-3 py-1.5 text-[11px] rounded bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white font-medium'>Confirm</button>
         </div>
       </div>
     </div>
   );
+
+  function confirmAction(){ const step = pendingStepRef.current; setShowConfirm(false); if (step) continueFrom(step); }
+  function cancelAction(){ setShowConfirm(false); pendingStepRef.current=null; }
+
+  function requestContinuation(stepId: string){
+    if (!projectId) return;
+    let msg = '';
+    if (stepId==='write') {
+      const selCount = selectedFiles.size;
+      msg = selectiveMode && selCount? `Rewrite ${selCount} selected file(s)? This will overwrite their current contents.` : 'Rewrite all generated files? This will overwrite existing files.';
+    } else {
+      msg = `Regenerate blueprint starting at '${stepId}'. This may change planned files and schema. Continue?`;
+    }
+    pendingStepRef.current = stepId; setConfirmMessage(msg); setShowConfirm(true);
+  }
+
+  return (
+    <div className='h-[calc(100vh-0px)] md:h-[calc(100vh-1rem)] p-0 md:p-2 relative'>
+      {ConfirmModal}
+      {/* Mobile top nav */}
+      <div className='md:hidden flex items-center justify-between px-4 py-2 border-b border-gray-800/70 bg-black/60 backdrop-blur-sm'>
+        <div className='flex gap-2'>
+          <button onClick={()=>setActiveTab('feed')} className={`px-3 py-1 rounded text-[11px] ${activeTab==='feed' ? 'bg-fuchsia-600 text-white':'bg-gray-800 text-gray-300'}`}>Feed</button>
+          <button onClick={()=>setActiveTab('editor')} disabled={!projectId} className={`px-3 py-1 rounded text-[11px] ${activeTab==='editor' ? 'bg-fuchsia-600 text-white': projectId? 'bg-gray-800 text-gray-300':'bg-gray-900 text-gray-600'}`}>Editor</button>
+        </div>
+        <Link href='/projects' className='text-[11px] underline text-fuchsia-300'>Projects</Link>
+      </div>
+
+      {/* Desktop layout */}
+      <div className='hidden md:grid md:grid-cols-[280px_minmax(0,1fr)] h-full md:rounded-xl md:border md:border-white/5 overflow-hidden bg-black/40 backdrop-blur-sm'>
+        <div className='p-4 flex flex-col border-r border-gray-800/60'>{FeedPanel}</div>
+        {EditorPanel}
+      </div>
+
+      {/* Mobile layout */}
+      <div className='md:hidden h-[calc(100vh-3.5rem)]'>
+        {activeTab==='feed' && <div className='h-full p-4 overflow-y-auto'>{FeedPanel}</div>}
+        {activeTab==='editor' && <div className='h-full'>{EditorPanel}</div>}
+      </div>
+    </div>
+  );
 }
+
+// Tailwind helper animation (if not already globally defined)
+// Add to globals.css if desired:
+// .animate-fade-in { @apply opacity-0; animation: fadeIn .25s forwards; }
+// @keyframes fadeIn { to { opacity:1 } }

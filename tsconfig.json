@@ -23,7 +23,8 @@
       "react",
       "react-dom",
       "next",
-      "next-auth"
+      "next-auth",
+      "jest"
     ],
     "baseUrl": ".",
     "paths": {
