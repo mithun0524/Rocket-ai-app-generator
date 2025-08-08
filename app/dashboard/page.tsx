@@ -52,6 +52,9 @@ export default function DashboardPage() {
   const gsapRef = useRef<any>(null);
   const [streamingFiles, setStreamingFiles] = useState<Record<string,{type:string; size?:number; content:string; done:boolean}>>({});
   const [activeStreamingFile, setActiveStreamingFile] = useState<string|undefined>(undefined);
+  const [tokenCount, setTokenCount] = useState(0);
+  const tokenTimesRef = useRef<number[]>([]);
+  const [tps, setTps] = useState(0);
 
   // Derived progress from steps
   const totalSteps = steps.length;
@@ -122,6 +125,7 @@ export default function DashboardPage() {
     const controller = newController();
     setLoading(true); setError(null); setCreatedFiles([]); setBlueprint(null); setProjectId(null);
     setSteps([]); stepsRef.current = []; setLogs([]); setTotalFiles(null); setProgress(0); setBlueprintDiff(null); setStepTimings({}); setSelectiveMode(false); setSelectedFiles(new Set());
+    setStreamingFiles({}); setActiveStreamingFile(undefined); setTokenCount(0); setTps(0); tokenTimesRef.current = [];
 
     try {
       const res = await fetch('/api/generate?stream=1', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ prompt, provider, params:{ temperature, top_p: topP, max_tokens: maxTokens, ...(provider==='gemini'? { geminiKey, model:'gemini-2.5-flash' }: {}) } }), signal: controller.signal });
@@ -177,6 +181,18 @@ export default function DashboardPage() {
               }
               else if (eventName==='file-end') {
                 const rel = payload.relativePath; setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, done:true } }; });
+              }
+              else if (eventName==='token') {
+                const txt = payload.text||'';
+                if (txt) {
+                  setTokenCount(c=>c+txt.length);
+                  const now = Date.now();
+                  tokenTimesRef.current.push(now);
+                  const cutoff = now - 4000; // 4s window
+                  tokenTimesRef.current = tokenTimesRef.current.filter(t=> t>=cutoff);
+                  const chars = tokenTimesRef.current.length? (tokenCount + txt.length): tokenCount + txt.length;
+                  setTps(tokenTimesRef.current.length / 4); // approx tokens/sec (char events ~ tokens)
+                }
               }
               else if (eventName==='total') { setTotalFiles(payload.files || 0); }
               else if (eventName==='meta' && payload.projectId) { setProjectId(payload.projectId); }
@@ -244,6 +260,7 @@ export default function DashboardPage() {
         });
       };
       setCreatedFiles([]); setLogs([]); setTotalFiles(null); setProgress(0); setBlueprintDiff(null); setStepTimings({});
+      setStreamingFiles({}); setActiveStreamingFile(undefined); setTokenCount(0); setTps(0); tokenTimesRef.current = [];
       while(true){
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream:true });
@@ -268,6 +285,17 @@ export default function DashboardPage() {
             }
             else if (eventName==='file-end') {
               const rel = payload.relativePath; setStreamingFiles(f=> { const cur = f[rel]; if(!cur) return f; return { ...f, [rel]: { ...cur, done:true } }; });
+            }
+            else if (eventName==='token') {
+              const txt = payload.text||'';
+              if (txt) {
+                setTokenCount(c=>c+txt.length);
+                const now = Date.now();
+                tokenTimesRef.current.push(now);
+                const cutoff = now - 4000;
+                tokenTimesRef.current = tokenTimesRef.current.filter(t=> t>=cutoff);
+                setTps(tokenTimesRef.current.length / 4);
+              }
             }
             else if(eventName==='complete') { setProgress(100); finalizeRun(); }
           } catch {}
@@ -552,7 +580,10 @@ export default function DashboardPage() {
             </div>
             {activeStreamingFile && streamingFiles[activeStreamingFile] && (
               <div className='text-[10px] font-mono bg-black/40 border border-gray-700 rounded p-2 max-h-36 overflow-auto'>
-                <div className='mb-1 text-fuchsia-300 truncate'>{activeStreamingFile}</div>
+                <div className='mb-1 flex justify-between items-center'>
+                  <span className='text-fuchsia-300 truncate mr-2'>{activeStreamingFile}</span>
+                  <span className='text-gray-500 text-[9px]'>{tokenCount} chars • {tps.toFixed(1)} cps</span>
+                </div>
                 <pre className='whitespace-pre-wrap leading-snug'>{streamingFiles[activeStreamingFile].content.slice(-4000)}</pre>
               </div>
             )}
@@ -627,7 +658,7 @@ export default function DashboardPage() {
   useEffect(()=> {
     if (!showIntro && isSplit && gsapRef.current) {
       // entrance animation disabled temporarily to resolve build issue
-      try { /* gsapRef.current.from('[data-feed-panel]', { opacity:0, y=14, duration:0.45, ease:'power2.out' }); */ } catch {}
+      try { /* gsapRef.current.from('[data-feed-panel]', { opacity:0, y:14, duration:0.45, ease:'power2.out' }); */ } catch {}
     }
   }, [showIntro, isSplit]);
 

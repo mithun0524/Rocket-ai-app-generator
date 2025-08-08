@@ -5,6 +5,8 @@ import { authOptions } from '@/lib/authOptions';
 import { writeGeneratedProject } from '@/utils/scaffold';
 import { checkRate } from '@/utils/rateLimiter';
 import { generateBlueprintUnified } from '@/utils/llm';
+import { salvageJson, llmRawSchema, transformRawToBlueprint } from '@/utils/blueprintParser';
+import { env } from '@/lib/env';
 
 export const runtime = 'nodejs';
 
@@ -22,6 +24,102 @@ function streamify(cb: (push:(event:string, data:any)=>void) => Promise<void>) {
   return new Response(readable, { headers: { 'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive' } });
 }
 
+function replaceBacktickContent(raw: string): string {
+  return raw.replace(/"content"\s*:\s*`([\s\S]*?)`/g, (_m, inner) => {
+    const jsonStr = JSON.stringify(inner);
+    return `"content": ${jsonStr}`;
+  }).replace(/`{3,}[\s\S]*?`{3,}/g, m => m.replace(/`/g,''));
+}
+
+async function streamOllamaRaw(prompt: string, params: any, onToken: (t:string)=>void): Promise<string> {
+  const baseUrl = env.OLLAMA_BASE_URL;
+  const model = env.OLLAMA_MODEL;
+  const system = `ROLE: Autonomous Next.js code generation agent.\nYou silently ANALYZE -> PLAN -> OUTPUT.\nYou must output ONLY VALID JSON (no backticks, no markdown, no commentary).\nSCHEMA: { "pages": { "route"?: string; "title"?: string; "name"?: string; "content": string; }[], "components": { "name": string; "content": string; }[], "apiRoutes": { "route"?: string; "name"?: string; "method"?: "GET"|"POST"|"PUT"|"DELETE"; "content": string; }[], "schema": string, "meta"?: { "plan"?: string[] }, "prismaModels"?: { "name": string; "definition": string; }[] }\nCONSTRAINTS:\n- Every array key present; empty array if none.\n- No empty content fields.\n- Prefer functional React components (App Router).\nOUTPUT: JSON ONLY.`;
+  const primaryPrompt = `${system}\nUser Prompt: ${prompt}\nReturn JSON now:`;
+  const body: any = { model, prompt: primaryPrompt, stream: true, options: { temperature: params?.temperature ?? 0.1, top_p: params?.top_p ?? 0.9, num_predict: params?.max_tokens ?? params?.num_predict ?? 2048 } };
+  const res = await fetch(`${baseUrl}/api/generate`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok || !res.body) throw new Error('Ollama stream failed');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = '';
+  let buf = '';
+  while(true){
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream:true });
+    const lines = buf.split(/\n+/);
+    buf = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const json = JSON.parse(trimmed);
+        if (typeof json.response === 'string') { raw += json.response; onToken(json.response); }
+      } catch { /* ignore */ }
+    }
+  }
+  return raw;
+}
+
+async function streamGeminiRaw(prompt: string, params: any, onToken:(t:string)=>void): Promise<string> {
+  const apiKey = params?.geminiKey || env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('Gemini API key missing');
+  const model = params?.model || 'gemini-2.5-flash';
+  const baseInstruction = 'You are a Next.js app generator. Output ONLY JSON matching the agreed blueprint schema with keys: pages[], components[], apiRoutes[], prismaModels[]. No markdown, no code fences.';
+  const user = `Prompt: ${prompt}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`;
+  const body = { contents: [{ parts: [{ text: baseInstruction + '\n' + user }] }] };
+  const res = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok || !res.body) throw new Error('Gemini stream failed');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = '';
+  let buffer = '';
+  while(true){
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream:true });
+    const parts = buffer.split(/\n+/);
+    buffer = parts.pop() || '';
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed);
+        const cands = obj?.candidates;
+        if (Array.isArray(cands)) {
+          for (const c of cands) {
+            const textParts = c?.content?.parts?.filter((p:any)=>p?.text).map((p:any)=>p.text) || [];
+            for (const t of textParts) { raw += t; onToken(t); }
+          }
+        }
+      } catch { /* ignore partial */ }
+    }
+  }
+  return raw;
+}
+
+async function parseRawToBlueprint(rawText: string, userPrompt: string, provider: 'ollama'|'gemini'): Promise<any> {
+  if (!rawText.trim()) throw new Error('Empty model output');
+  let candidates = [rawText, replaceBacktickContent(rawText)];
+  let rawJson: any = null;
+  for (const c of candidates) { try { rawJson = salvageJson(c); break; } catch {} }
+  if (!rawJson) throw new Error('Invalid JSON from model');
+  const parsed = llmRawSchema.safeParse(rawJson);
+  if (!parsed.success) {
+    const coerce: any = rawJson || {};
+    if (!Array.isArray(coerce.pages)) coerce.pages = [];
+    if (!Array.isArray(coerce.components)) coerce.components = [];
+    if (!Array.isArray(coerce.apiRoutes)) coerce.apiRoutes = [];
+    if (!Array.isArray(coerce.prismaModels)) coerce.prismaModels = [];
+    const reparsed = llmRawSchema.safeParse(coerce);
+    if (!reparsed.success) throw new Error('Schema mismatch');
+    return transformRawToBlueprint(reparsed.data, userPrompt);
+  }
+  const { meta, ...usable } = parsed.data as any;
+  return transformRawToBlueprint(usable, userPrompt);
+}
+
 export async function POST(req: Request) {
   const url = new URL(req.url);
   const stream = url.searchParams.get('stream');
@@ -29,8 +127,7 @@ export async function POST(req: Request) {
   if (!session?.user?.email || !session.user.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  const userId = session.user.id; // assured by check above
-  const userEmail = session.user.email as string; // retained if needed elsewhere
+  const userId = session.user.id;
   const key = `gen:${userId}`;
   const rate = await checkRate(key);
   if (!rate.allowed) return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
@@ -42,7 +139,6 @@ export async function POST(req: Request) {
   if (prompt.length > 4000) return NextResponse.json({ error: 'Prompt too long' }, { status: 413 });
 
   if (!stream) {
-    // non streaming legacy
     try {
       const blueprint = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
       const projectName = (typeof name === 'string' && name.trim()) ? name.trim() : (blueprint?.name ? String(blueprint.name) : 'Generated Project');
@@ -58,11 +154,30 @@ export async function POST(req: Request) {
     }
   }
 
-  // streaming mode
   return streamify(async push => {
     push('log', { message: 'Starting generation', ts: Date.now() });
     push('step', { id:'parse', status:'active', label:'Parsing prompt' });
-    const blueprint = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
+
+    let rawText = '';
+    try {
+      if (provider === 'gemini') {
+        rawText = await streamGeminiRaw(prompt, params||{}, t => push('token', { text: t, provider:'gemini' }));
+      } else {
+        rawText = await streamOllamaRaw(prompt, params||{}, t => push('token', { text: t, provider:'ollama' }));
+      }
+    } catch (e:any) {
+      push('error', { message: e?.message || 'Streaming failed' });
+      return;
+    }
+
+    let blueprint: any = null;
+    try {
+      blueprint = await parseRawToBlueprint(rawText, prompt, provider==='gemini'?'gemini':'ollama');
+    } catch (e:any) {
+      push('error', { message: e?.message || 'Parse failed' });
+      return;
+    }
+
     push('log', { message: 'Blueprint generated', ts: Date.now() });
     push('step', { id:'parse', status:'done' });
     push('step', { id:'plan', status:'done', label:'Planning blueprint' });
@@ -75,12 +190,11 @@ export async function POST(req: Request) {
     });
     push('meta', { projectId: project.id });
 
-    // compute total files (include barrel & prisma if present)
     const totalFiles = (
       (blueprint.components?.length || 0) +
       (blueprint.pages?.length || 0) +
       (blueprint.apiRoutes?.length || 0) +
-      (blueprint.components?.length ? 1 : 0) + // barrel
+      (blueprint.components?.length ? 1 : 0) +
       (blueprint.prismaModels?.length ? 1 : 0)
     );
     push('total', { files: totalFiles });
