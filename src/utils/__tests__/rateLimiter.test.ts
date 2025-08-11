@@ -1,3 +1,6 @@
+// Ensure required env vars before modules import env.ts via rateLimiter
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'file:dev.db';
+process.env.NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET || 'testsecretlongenough';
 import { checkRate, __resetRateLimiter, __RATE_LIMIT_MAX } from '@/utils/rateLimiter';
 
 describe('rateLimiter', () => {

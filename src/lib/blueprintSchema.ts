@@ -25,6 +25,7 @@ export const prismaModelSchema = z.object({
 });
 
 export const blueprintSchema = z.object({
+  version: z.number().int().min(1).default(1),
   name: z.string(),
   description: z.string().optional(),
   pages: z.array(pageSchema),

@@ -35,6 +35,7 @@ async function checkOllamaHealth(): Promise<boolean> {
 
 function minimalBlueprint(prompt: string): Blueprint {
   return {
+  version: 1,
     name: 'Minimal Project',
     description: `Fallback for: ${prompt.slice(0,80)}`,
     pages: [{ route: '/', title: 'Home', components: [], code: "export default function Page(){return <div>Fallback Home</div>}" }],

@@ -5,6 +5,7 @@ import { authOptions } from '@/lib/authOptions';
 import { writeGeneratedProject } from '@/utils/scaffold';
 import { checkRate } from '@/utils/rateLimiter';
 import { generateBlueprintUnified } from '@/utils/llm';
+import { generatePlanV2 } from '@/planner/extract';
 
 export const runtime = 'nodejs';
 
@@ -71,6 +72,18 @@ function diffBlueprint(oldBp: any, newBp: any) {
   return { added, removed, changed, paths, details };
 }
 
+function planV2ToBlueprint(plan:any, prevName:string|undefined){
+  if(!plan) return null;
+  return {
+    name: prevName || 'Generated Project',
+    planV2: plan,
+    pages: plan.routes.filter((r:any)=>r.type==='page').map((r:any)=> ({ route: r.path, title: r.description?.slice(0,40), content: '' })),
+    components: plan.components.map((c:any)=> ({ name:c.name, content:'' })),
+    apiRoutes: plan.routes.filter((r:any)=>r.type==='api').map((r:any)=> ({ route: r.path, method: r.method||'GET', content:'' })),
+    prismaModels: plan.prismaModels.map((m:any)=> ({ name:m.name, definition:m.definition }))
+  };
+}
+
 export async function POST(req: Request) {
   const url = new URL(req.url);
   const start: StepId = (url.searchParams.get('step') as StepId) || 'write';
@@ -119,22 +132,77 @@ export async function POST(req: Request) {
         push('log', { message: 'Continuation complete', ts: Date.now() });
         try {
           const stepMetrics = JSON.stringify({ steps: STEP_ORDER.map(s=>({ id:s, ms:null })) });
-          await prisma.run.create({ data: { projectId, provider, files: (blueprint?.components?.length||0)+(blueprint?.pages?.length||0)+(blueprint?.apiRoutes?.length||0), stepMetrics, diff: null, params: Object.keys(params).length? JSON.stringify(params): null } });
+          // attempt to include plan section timings if present on blueprint.planV2
+          let planSections: any[] | undefined = undefined;
+          try { if ((blueprint as any)?.planV2?.sectionsTimings) planSections = (blueprint as any).planV2.sectionsTimings; } catch {}
+          let metricsObj: any = { steps: STEP_ORDER.map(s=>({ id:s, ms:null })) };
+          if (planSections) metricsObj.planSections = planSections;
+          await prisma.run.create({ data: { projectId, provider, files: (blueprint?.components?.length||0)+(blueprint?.pages?.length||0)+(blueprint?.apiRoutes?.length||0), stepMetrics: JSON.stringify(metricsObj), diff: null, params: Object.keys(params).length? JSON.stringify(params): null } });
         } catch {}
         break;
       }
       if (step === 'parse') {
-        activate('parse','Parsing prompt');
-        blueprint = await generateBlueprintUnified(project.prompt, provider, params);
-        push('log', { message:'Prompt parsed & blueprint regenerated', ts: Date.now() });
+        activate('parse','Planning (V2)');
+        try {
+          const planTimings: { section:string; ms:number }[] = [];
+          const plan = await generatePlanV2(project.prompt, provider, params, ({ section, ms, data }) => {
+            if (section !== 'final') {
+              planTimings.push({ section, ms });
+              push('event', { type:'plan-v2-part', section, ms, size: Array.isArray(data)? data.length : (typeof data==='object'? Object.keys(data||{}).length:0) });
+              if (section === 'routes') push('event', { type:'plan-v2-snapshot', plan: { routes: data } });
+            } else {
+              push('event', { type:'plan-v2', plan: data });
+              push('event', { type:'plan-v2-metrics', timings: planTimings });
+            }
+          });
+          blueprint = planV2ToBlueprint(plan, project.name) || blueprint;
+          push('log', { message:`PlanV2: ${plan.entities.length} entities, ${plan.features.length} features`, ts: Date.now() });
+        } catch(e:any) {
+          push('log', { message:`PlanV2 failed, fallback blueprint: ${e.message}`, ts: Date.now() });
+          blueprint = await generateBlueprintUnified(project.prompt, provider, params);
+        }
         done('parse');
       } else if (step === 'plan') {
-        activate('plan','Planning blueprint');
-        if (!blueprint) { blueprint = await generateBlueprintUnified(project.prompt, provider, params); push('log', { message:'Blueprint regenerated (plan)', ts: Date.now() }); }
+        activate('plan','Finalize plan');
+        if (!blueprint) {
+          try {
+            const planTimings: { section:string; ms:number }[] = [];
+            const plan = await generatePlanV2(project.prompt, provider, params, ({ section, ms, data }) => {
+              if (section !== 'final') {
+                planTimings.push({ section, ms });
+                push('event', { type:'plan-v2-part', section, ms, size: Array.isArray(data)? data.length : (typeof data==='object'? Object.keys(data||{}).length:0) });
+              } else {
+                push('event', { type:'plan-v2', plan: data });
+                push('event', { type:'plan-v2-metrics', timings: planTimings });
+              }
+            });
+            blueprint = planV2ToBlueprint(plan, project.name) || blueprint;
+          } catch(e:any) {
+            push('log', { message:`PlanV2 (plan step) failed: ${e.message}`, ts: Date.now() });
+            blueprint = await generateBlueprintUnified(project.prompt, provider, params);
+          }
+        }
         done('plan');
       } else if (step === 'validate') {
-        activate('validate','Validating schema');
-        if (!blueprint) { blueprint = await generateBlueprintUnified(project.prompt, provider, params); push('log', { message:'Blueprint regenerated (validate)', ts: Date.now() }); }
+        activate('validate','Validating plan');
+        if (!blueprint?.planV2) {
+          try {
+            const planTimings: { section:string; ms:number }[] = [];
+            const plan = await generatePlanV2(project.prompt, provider, params, ({ section, ms, data }) => {
+              if (section !== 'final') {
+                planTimings.push({ section, ms });
+                push('event', { type:'plan-v2-part', section, ms, size: Array.isArray(data)? data.length : (typeof data==='object'? Object.keys(data||{}).length:0) });
+              } else {
+                push('event', { type:'plan-v2', plan: data });
+                push('event', { type:'plan-v2-metrics', timings: planTimings });
+              }
+            });
+            blueprint = planV2ToBlueprint(plan, project.name) || blueprint;
+          } catch(e:any) {
+            push('log', { message:`PlanV2 (validate) failed: ${e.message}`, ts: Date.now() });
+            if (!blueprint) blueprint = await generateBlueprintUnified(project.prompt, provider, params);
+          }
+        }
         done('validate');
       } else if (step === 'write') {
         activate('write','Writing files');

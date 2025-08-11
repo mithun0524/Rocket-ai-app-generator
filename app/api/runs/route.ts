@@ -14,5 +14,9 @@ export async function GET(req: Request) {
   const project = await prisma.project.findFirst({ where:{ id: projectId, userId: session.user.id } });
   if (!project) return NextResponse.json({ error:'Not found' }, { status:404 });
   const runs = await prisma.run.findMany({ where:{ projectId }, orderBy:{ createdAt:'desc' }, take:50 });
-  return NextResponse.json({ runs: runs.map(r => ({ id:r.id, ts:r.createdAt.getTime(), provider:r.provider, files:r.files, stepMetrics: JSON.parse(r.stepMetrics), diff: r.diff? JSON.parse(r.diff): null })) });
+  return NextResponse.json({ runs: runs.map(r => {
+    let metrics: any = {};
+    try { metrics = JSON.parse(r.stepMetrics); } catch { metrics = {}; }
+    return { id:r.id, ts:r.createdAt.getTime(), provider:r.provider, files:r.files, stepMetrics: metrics, diff: r.diff? JSON.parse(r.diff): null };
+  }) });
 }

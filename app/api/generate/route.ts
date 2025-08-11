@@ -4,9 +4,11 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/authOptions';
 import { writeGeneratedProject } from '@/utils/scaffold';
 import { checkRate } from '@/utils/rateLimiter';
+import { validateCsrf } from '@/utils/csrf';
 import { generateBlueprintUnified } from '@/utils/llm';
 import { salvageJson, llmRawSchema, transformRawToBlueprint } from '@/utils/blueprintParser';
 import { env } from '@/lib/env';
+import { generatePlanV2 } from '@/planner/extract';
 
 export const runtime = 'nodejs';
 
@@ -161,13 +163,14 @@ export async function POST(req: Request) {
   }
   const userId = session.user.id;
   const key = `gen:${userId}`;
-  const rate = await checkRate(key);
+  const rate = await checkRate(key, 'generate');
   if (!rate.allowed) return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
 
   let body: any;
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }); }
   const { prompt, name, provider, params } = body || {};
   if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 });
+  if (!validateCsrf(req)) return NextResponse.json({ error: 'CSRF' }, { status: 403 });
   if (prompt.length > 4000) return NextResponse.json({ error: 'Prompt too long' }, { status: 413 });
 
   if (!stream) {
@@ -188,21 +191,65 @@ export async function POST(req: Request) {
 
   return streamify(async push => {
     push('log', { message: 'Starting generation', ts: Date.now() });
-    // New structure planning phase
-    push('step', { id:'parse', status:'active', label:'Planning structure' });
-    const structureProvider: 'gemini'|'ollama' = provider === 'gemini' ? 'gemini' : 'ollama';
-    let structurePlan: any = null;
+    // PlanV2 high fidelity planning phase (now incremental)
+    push('step', { id:'parse', status:'active', label:'Planning (V2)' });
+  const planSectionTimings: { section:string; ms:number }[] = [];
+  let planV2: any = null;
+  let fallbackStructure: any = null;
     try {
-      const { generateStructurePlan } = await import('@/utils/structure');
-      structurePlan = await generateStructurePlan(prompt, structureProvider, params||{});
-      push('event', { type:'structure-plan', plan: structurePlan });
-      push('log', { message:`Structure planned: ${structurePlan.pages.length} pages, ${structurePlan.components.length} components, ${structurePlan.apiRoutes.length} APIs`, ts: Date.now() });
+      planV2 = await generatePlanV2(prompt, provider === 'gemini' ? 'gemini':'ollama', params||{}, ({ section, ms, data }) => {
+        if (section !== 'final') {
+          planSectionTimings.push({ section, ms });
+          push('event', { type:'plan-v2-part', section, ms, size: Array.isArray(data)? data.length : (typeof data==='object'? Object.keys(data||{}).length: 0) });
+          if (section === 'routes') {
+            // after routes discovered, emit partial plan snapshot so UI can show routes early
+            push('event', { type:'plan-v2-snapshot', plan: { routes: data } });
+          }
+        } else {
+          planV2 = data;
+          push('event', { type:'plan-v2', plan: planV2 });
+        }
+      });
+      push('log', { message:`PlanV2 complete: ${planV2.entities.length} entities, ${planV2.features.length} features, ${planV2.routes.length} routes`, ts: Date.now() });
+      push('event', { type:'plan-v2-metrics', timings: planSectionTimings });
     } catch (e:any) {
-      push('log', { message:'Structure planning failed, using minimal default', ts: Date.now() });
-      structurePlan = { pages:[{ route:'/', title:'Home'}], components:[], apiRoutes:[], prismaModels:[] };
-      push('event', { type:'structure-plan', plan: structurePlan, fallback:true });
+      push('log', { message:`PlanV2 failed: ${e.message}`, ts: Date.now() });
+      planV2 = null;
+      // Fallback: generate unified blueprint so user still gets artifacts
+      try {
+        push('log', { message:'Falling back to unified blueprint generation…', ts: Date.now() });
+        const fallback = await generateBlueprintUnified(prompt, provider === 'gemini' ? 'gemini':'ollama', params);
+        // derive a pseudo planV2 minimal (optional)
+        planV2 = undefined; // keep null to signal partial; we'll use fallback directly
+        // Build structurePlan from fallback blueprint shape
+  fallbackStructure = {
+          pages: fallback.pages?.map((p:any)=> ({ route:p.route, title:p.title })) || [],
+            components: fallback.components?.map((c:any)=> ({ name:c.name })) || [],
+            apiRoutes: fallback.apiRoutes?.map((r:any)=> ({ route:r.route, method:r.method||'GET' })) || [],
+            prismaModels: fallback.prismaModels?.map((m:any)=> ({ name:m.name, definition:m.definition })) || []
+        };
+        // emit as structure-plan so UI proceeds with artifact generation
+  push('event', { type:'structure-plan', plan: fallbackStructure });
+        // For artifact loop below we set structurePlan after section logic
+        planSectionTimings.push({ section:'fallback', ms:0 });
+      } catch (fe:any) {
+        push('log', { message:`Unified fallback failed: ${fe.message}`, ts: Date.now() });
+      }
     }
-    // Begin artifact generation
+    // Derive legacy structurePlan fallback from PlanV2 if available
+    let structurePlan: any = null;
+    if (planV2) {
+      structurePlan = {
+        pages: planV2.routes.filter((r:any)=>r.type==='page').map((r:any)=> ({ route: r.path, title: r.description?.slice(0,40) })),
+        components: planV2.components.map((c:any)=> ({ name: c.name })),
+        apiRoutes: planV2.routes.filter((r:any)=>r.type==='api').map((r:any)=> ({ route: r.path, method: r.method||'GET' })),
+        prismaModels: planV2.prismaModels.map((m:any)=> ({ name: m.name, definition: m.definition }))
+      };
+    } else if (!structurePlan) {
+      // use fallbackStructure if available
+      structurePlan = fallbackStructure;
+    }
+    // Existing structure-first flow (renamed step labels)
     push('step', { id:'parse', status:'done' });
     push('step', { id:'plan', status:'active', label:'Generating artifacts' });
 
@@ -219,10 +266,21 @@ export async function POST(req: Request) {
     const { generateArtifactCode } = await import('@/utils/structure');
 
     const artifacts: { kind:'page'|'component'|'api'|'model'; ref:any }[] = [];
-    structurePlan.pages.forEach((p:any)=> artifacts.push({ kind:'page', ref:p }));
-    structurePlan.components.forEach((c:any)=> artifacts.push({ kind:'component', ref:c }));
-    structurePlan.apiRoutes.forEach((r:any)=> artifacts.push({ kind:'api', ref:r }));
-    structurePlan.prismaModels?.forEach((m:any)=> artifacts.push({ kind:'model', ref:m }));
+    const structureProvider: 'gemini'|'ollama' = provider === 'gemini' ? 'gemini' : 'ollama';
+    if (structurePlan) {
+      structurePlan.pages.forEach((p:any)=> artifacts.push({ kind:'page', ref:p }));
+      structurePlan.components.forEach((c:any)=> artifacts.push({ kind:'component', ref:c }));
+      structurePlan.apiRoutes.forEach((r:any)=> artifacts.push({ kind:'api', ref:r }));
+      structurePlan.prismaModels?.forEach((m:any)=> artifacts.push({ kind:'model', ref:m }));
+    }
+
+    // Guarantee at least one artifact if everything failed
+    if (!artifacts.length) {
+      const defaultPage = { route:'/', title:'Home' };
+      artifacts.push({ kind:'page', ref: defaultPage });
+      structurePlan = structurePlan || { pages:[defaultPage], components:[], apiRoutes:[], prismaModels:[] };
+      push('log', { message:'Inserted default Home page due to empty structure plan', ts: Date.now() });
+    }
 
     const totalArtifacts = artifacts.length;
     push('event', { type:'artifact-total', total: totalArtifacts });
@@ -276,6 +334,7 @@ export async function POST(req: Request) {
     // Assemble blueprint shape consistent with existing writer expectations
     const blueprint = {
       name: name || 'Generated Project',
+      planV2: planV2 || undefined,
       pages: pages.map(p=>({ route:p.route, title:p.title, content: p.code })),
       components: components.map(c=>({ name:c.name, content:c.code })),
       apiRoutes: apiRoutes.map(r=>({ route:r.route, method:r.method, content:r.code })),
@@ -305,5 +364,19 @@ export async function POST(req: Request) {
     push('blueprint', blueprint);
     push('complete', { projectId: project.id });
     push('log', { message: 'Generation complete (structure-first)', ts: Date.now() });
+
+    // Persist run metrics (plan section timings + file counts)
+    try {
+      const stepMetrics = { steps: [
+        { id:'parse', ms: null }, // server does not currently measure full step durations
+        { id:'plan', ms: null },
+        { id:'validate', ms: null },
+        { id:'write', ms: null },
+        { id:'final', ms: null }
+      ], planSections: planSectionTimings };
+      await prisma.run.create({ data: { projectId: project.id, provider: (provider=== 'gemini' ? 'gemini':'ollama'), files: totalFiles, stepMetrics: JSON.stringify(stepMetrics), diff: null, params: params? JSON.stringify(params): null } });
+    } catch (e) {
+      // non-fatal
+    }
   });
 }

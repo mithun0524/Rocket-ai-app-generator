@@ -146,6 +146,7 @@ export function transformRawToBlueprint(raw: z.infer<typeof llmRawSchema>, promp
     return { route: p.route, title: p.title, components: componentNames.filter(n => code.includes(n)), code };
   });
   const blueprintDraft: Blueprint = {
+  version: 1,
     name: `Generated ${pascal(prompt.split(/[\.!?\n]/)[0].slice(0,40))}`,
     description: 'Auto-generated from prompt',
     pages: enhancedPages.length ? enhancedPages : [{ route: '/', title: 'Home', components: [], code: 'export default function Page(){return <div>Home</div>;}' }],

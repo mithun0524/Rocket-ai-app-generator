@@ -39,6 +39,9 @@
       ],
       "@/templates/*": [
         "src/templates/*"
+      ],
+      "@/planner/*": [
+        "src/planner/*"
       ]
     },
     "plugins": [

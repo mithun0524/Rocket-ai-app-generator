@@ -16,6 +16,7 @@ model User {
   sessions      Session[]
   accounts      Account[]
   projects      Project[]
+  auditEvents   AuditEvent[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   @@index([createdAt])
@@ -64,6 +65,8 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   runs        Run[]
+  opLogs      OpLog[]
+  auditEvents AuditEvent[]
   @@index([userId, createdAt])
 }
 
@@ -78,4 +81,35 @@ model Run {
   params     String?  // JSON stringified model params
   createdAt  DateTime @default(now())
   @@index([projectId, createdAt])
+}
+
+model OpLog {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  operations String   // JSON stringified operations object
+  summary    String?
+  snapshot   String?  // JSON stringified snapshot for rollback
+  preSnapshot String? // JSON stringified blueprint before op
+  filesTouched Int?
+  bytesWritten Int?
+  durationMs Int?
+  installOutput String?
+  createdAt  DateTime @default(now())
+  @@index([projectId, createdAt])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  message   String?
+  meta      String? // JSON
+  createdAt DateTime @default(now())
+  @@index([projectId, createdAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
 }

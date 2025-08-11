@@ -8,6 +8,7 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   NEXTAUTH_SECRET: z.string().min(8), // allow shorter in dev, warn below if <16
   NEXTAUTH_URL: z.string().url().optional(),
+  REDIS_URL: z.string().url().optional(),
 });
 
 const parsed = envSchema.parse({
@@ -18,6 +19,7 @@ const parsed = envSchema.parse({
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET,
   NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+  REDIS_URL: process.env.REDIS_URL,
 });
 
 if (parsed.NEXTAUTH_SECRET.length < 16) {

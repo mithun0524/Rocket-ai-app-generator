@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import AuthDashboardButton from '@/components/AuthDashboardButton';
 
 export default function HomePage() {
   return (
@@ -51,13 +52,8 @@ export default function HomePage() {
                 d="M9 5l7 7-7 7"
               />
             </svg>
-          </Link>
-          <Link
-            href="/auth/register"
-            className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 px-8 py-4 text-sm font-semibold backdrop-blur transition"
-          >
-            Create Account
-          </Link>
+          {/* Auth-aware dashboard button */}
+          <AuthDashboardButton />
         </div>
         <div className="flex flex-wrap justify-center gap-6 pt-6 text-[11px] text-gray-500 uppercase tracking-wider">
           <span>Streaming Steps</span>
@@ -178,13 +174,7 @@ export default function HomePage() {
               className="rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 px-5 py-2.5 text-[13px] font-semibold shadow shadow-fuchsia-900/40"
             >
               Start Building
-            </Link>
-            <Link
-              href="/projects"
-              className="rounded-md border border-white/15 bg-white/5 hover:bg-white/10 px-5 py-2.5 text-[13px] font-semibold"
-            >
-              View Projects
-            </Link>
+            <AuthDashboardButton />
           </div>
         </div>
         <div className="relative">
